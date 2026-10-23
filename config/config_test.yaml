@@ -1,0 +1,61 @@
+seed: 42
+mode: backfill
+live_speed_sim_hours_per_real_sec: 1
+history_days: 5
+start_date: "2026-04-01"
+
+ids:
+  customer_prefix: "C"
+  customer_width: 7
+  tower_prefix: "T"
+  tower_width: 5
+
+customers:
+  initial: 100
+  initial_burst_days: 1
+  new_per_day: 5
+  prepaid_share: 0.88
+
+geography:
+  Karachi:             {share: 0.30, towers: 3, teams: 1}
+  Lahore:              {share: 0.22, towers: 3, teams: 1}
+  Islamabad_Rawalpindi: {share: 0.12, towers: 2, teams: 1}
+  Faisalabad:          {share: 0.08, towers: 2, teams: 1}
+  Peshawar:            {share: 0.08, towers: 2, teams: 1}
+  Multan:              {share: 0.07, towers: 1, teams: 1}
+  Quetta:              {share: 0.05, towers: 1, teams: 1}
+  Other_cities:        {share: 0.08, towers: 2, teams: 1}
+
+packages:
+  count: 40
+
+churn:
+  target_rate: 0.265
+  inactivity_to_suspend_days: 14
+  suspend_to_churn_days: 30
+
+towers:
+  degraded_load: 0.85
+  critical_load: 1.0
+  degraded_signal_dbm: -95
+  critical_signal_dbm: -105
+  failure_precursor_share: 0.7
+
+dirty_data:
+  null_rate: 0.015
+  duplicate_rate: 0.005
+  late_rate: 0.015
+  late_max_hours: 48
+
+kafka:
+  bootstrap: "localhost:9092"
+  partitions: 6
+  replication: 1
+
+s3:
+  bucket: "churnguard-data-bilawal"
+  region: "ap-south-1"
+  prefix: "raw"
+  batch_records: 5000
+  batch_seconds: 60
+  compression: "gzip"

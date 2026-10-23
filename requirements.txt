@@ -1,0 +1,16 @@
+# Core simulator
+numpy
+PyYAML
+
+# Package-data scraping and parsing
+beautifulsoup4
+requests
+
+# Data and cloud pipeline integrations
+pandas
+boto3
+kafka-python
+pyarrow
+
+# Development and tests
+pytest

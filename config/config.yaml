@@ -1,0 +1,64 @@
+seed: 42
+mode: backfill            # backfill (tez) ya live (dheema)
+live_speed_sim_hours_per_real_sec: 1
+history_days: 180
+start_date: "2026-04-01"  # simulated shuru ki tareekh, badal sakte hain
+
+ids:
+  customer_prefix: "C"
+  customer_width: 7
+  tower_prefix: "T"
+  tower_width: 5
+
+customers:
+  initial: 20000              # shuru ka burst (pehle 7 din mein)
+  initial_burst_days: 7
+  new_per_day: 55             # phir steady, kul ~30,000
+  prepaid_share: 0.88
+
+                    # share = customers ka hissa
+geography:
+  Karachi:             {share: 0.30, towers: 30, teams: 6}
+  Lahore:              {share: 0.22, towers: 25, teams: 5}
+  Islamabad_Rawalpindi: {share: 0.12, towers: 13, teams: 3}
+  Faisalabad:          {share: 0.08, towers: 9,  teams: 2}
+  Peshawar:            {share: 0.08, towers: 9,  teams: 2}
+  Multan:              {share: 0.07, towers: 8,  teams: 2}
+  Quetta:              {share: 0.05, towers: 6,  teams: 2}
+  Other_cities:        {share: 0.08, towers: 10, teams: 3}
+
+packages:
+  count: 40
+
+churn:
+  target_rate: 0.265          # 180 din mein overall, pehli run mein calibrate
+  inactivity_to_suspend_days: 14
+  suspend_to_churn_days: 30
+
+towers:
+  degraded_load: 0.85
+  critical_load: 1.0
+  degraded_signal_dbm: -95
+  critical_signal_dbm: -105
+  failure_precursor_share: 0.7   # 70% failures se pehle signal girta hai
+
+dirty_data:
+  null_rate: 0.015
+  duplicate_rate: 0.005
+  late_rate: 0.015
+  late_max_hours: 48
+
+kafka:
+  bootstrap: "localhost:9092"
+  partitions: 6
+  replication: 1
+
+s3:
+  bucket: "churnguard-data-bilawal"
+  region: "ap-south-1"
+  prefix: "raw"
+  batch_records: 5000
+  batch_seconds: 60
+  compression: "gzip"
+
+  

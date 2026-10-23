@@ -1,0 +1,4 @@
+Source: jazz.com.pk public prepaid pages (listing /prepaid/data and per-package pages).
+Collected: 2026-10-10. Prices include tax. 1 GB = 1024 MB.
+Cleaned by hand from data/reference/jazz_packages_v2.csv. We5 family bundles and
+Super Woman Bundle excluded. Values marked "assumed" are interpretations.
