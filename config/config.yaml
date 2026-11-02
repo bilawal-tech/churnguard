@@ -13,10 +13,11 @@ ids:
 customers:
   initial: 20000              # shuru ka burst (pehle 7 din mein)
   initial_burst_days: 7
+  burst_decay: 0.8            # burst ke har din ka hissa pichle din ka 0.8 guna
   new_per_day: 55             # phir steady, kul ~30,000
-  prepaid_share: 0.88
+  prepaid_share: 0.88         # share = customers ka hissa
 
-                    # share = customers ka hissa
+                    
 geography:
   Karachi:             {share: 0.30, towers: 30, teams: 6}
   Lahore:              {share: 0.22, towers: 25, teams: 5}

@@ -56,6 +56,10 @@ Kafka key aur S3 partition har topic ke naam ke saath. Topics ki setting: 6 part
 | signup_date | date | |
 | region, city | string | |
 | zone | string | **[tay karna hai]** doc section 10 mein hai, magar hum ne tay kiya tha ke zone tower_master se join hoga. Static, ek baar ka field hai, to home tower se nikal kar rakhna sasta hai. |
+
+**[tay hua]** customer_events mein zone nahi hoga. Customer ki connectivity badalti rehti hai (usage_events ka tower_id har band alag), is liye zone hamesha tower_id se tower_master se join hoga. Customer ke paas sirf home_tower_id rahega.
+
+
 | segment | string | prepaid / postpaid (simulator state mein `plan_type`) |
 | acquisition_channel | string | **[tay karna hai]** values aur taqseem |
 | device_type | string | **[tay karna hai]** values aur taqseem |

@@ -13,6 +13,7 @@ ids:
 customers:
   initial: 100
   initial_burst_days: 1
+  burst_decay: 0.8
   new_per_day: 5
   prepaid_share: 0.88
 
