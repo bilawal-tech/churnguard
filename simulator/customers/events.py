@@ -63,6 +63,10 @@ def _event_id(seed, topic, *parts):
     text = "|".join([str(seed), topic] + [str(p) for p in parts])
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
 
+def device_type_for(cfg, n):
+    """Device type of customer n (same value every time; events and usage both use it)."""
+    rng = make_rng(cfg["seed"], "device", n)
+    return _pick(rng, DEVICES)
 
 def _envelope(cfg, topic, customer_id, signup_index, *id_parts):
     """Common fields for one event, plus the signup date of that band."""
@@ -89,7 +93,7 @@ def build_customer_event(cfg, customer, n, signup_index):
         "city": customer["city"],
         "segment": customer["plan_type"],
         "acquisition_channel": _pick(rng, CHANNELS),
-        "device_type": _pick(rng, DEVICES),
+        "device_type": device_type_for(cfg, n),
         "initial_balance": customer["balance"],
         "home_tower_id": customer["home_tower_id"],
     })

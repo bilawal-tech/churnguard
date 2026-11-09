@@ -110,3 +110,19 @@ def test_arpu_prepaid_leans_lower_than_postpaid(cfg):
             e = ev.build_profile_event(cfg, make_customer(n, plan), n, 0)
             high[plan] += e["arpu_band"] == "high"
     assert high["prepaid"] < high["postpaid"]
+
+
+def test_device_type_for_is_stable_and_used_in_event(cfg):
+    for n in (1, 2, 3, 50):
+        device = ev.device_type_for(cfg, n)
+        assert device == ev.device_type_for(cfg, n)
+        e = ev.build_customer_event(cfg, make_customer(n), n, 0)
+        assert e["device_type"] == device
+
+
+def test_device_type_for_share(cfg):
+    total = 4000
+    feature = sum(
+        ev.device_type_for(cfg, n) == "feature_phone" for n in range(1, total + 1)
+    )
+    assert 0.26 < feature / total < 0.34
