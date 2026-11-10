@@ -1,6 +1,6 @@
 # ChurnGuard v2 - Event Schemas (consolidated)
 
-Source: Claude Docs "ChurnGuard v2 - Phase 1 Schema and Simulator Design" (v1.1, with section 10 additions) plus the decisions made later. Where the old doc and the newer decisions disagree, the newer decision is used and marked **[naya]**. Items still undecided are marked **[tay karna hai]**.
+Source: Claude Docs "ChurnGuard v2 - Phase 1 Schema and Simulator Design" (v1.1, with section 10 additions) plus the decisions made later. Where the old doc and the newer decisions disagree, the newer decision is used and marked **[naya]**. Items still undecided are marked **[tay karna hai]**. Items settled in Step 4 are marked **[tay hua]**.
 
 ## 0. Old doc vs newer decisions (naya hi sahi)
 
@@ -10,19 +10,22 @@ Source: Claude Docs "ChurnGuard v2 - Phase 1 Schema and Simulator Design" (v1.1,
 | customer_id | C000123 | C0000001 (width 7) |
 | Geography | Pilot sirf Lahore, ~60-100 towers | 8 shehar, 110 towers, 25 teams, 30,000 customers |
 | zone | Gulberg, DHA ... (Lahore zones) | NE / NW / SE / SW (shehar ke markaz se), jaise Karachi-NW |
+| zone in customer_events | section 10 mein tha | **[tay hua]** nahi rakha, zone hamesha tower_id se tower_master se join hota hai |
 | tower_metrics volume | 400 towers, ~1.7M | 110 x 24 x 180 = ~0.48M events |
 | Package minutes | quota_voice_min | 4 fields: quota_onnet_min, quota_offnet_min, quota_anynet_min, quota_intl_min |
 | Packages | ~40 rows, ids like PKG_D1_1GB | 29 (Jazz CSV se), id P_<TYPE>_<DAYS>D_<4 hex>, types social/voice/data/combo, + region, night_only |
 | Team fields | contact, team_size | built masters mein nahi hain (team_id, region, city, zone, base_lat, base_lon) |
 | Dirty data | ~1-2% | nulls 1.5%, duplicates 0.5%, late 1.5% (max 48 ghante) |
 | field_team_status_events | optional, hourly | team movement abhi nahi (fixed base), is liye nahi banega |
+| Profile aur customer ki values | **[tay karna hai]** | **[tay hua]** age_band, gender, language_pref, arpu_band, acquisition_channel, device_type ki taqseem neeche section 3 mein |
+| Customer burst | pehle 7 din, 20,000 | decaying burst, config key `customers.burst_decay` (0.8) |
 
 ## 1. Common envelope (har event mein)
 
 | Field | Type | Note |
 |---|---|---|
-| event_id | string | seed se deterministic, dedupe key |
-| event_time | timestamp | simulated, ISO-8601 +05:00 |
+| event_id | string | seed se deterministic, dedupe key. 20 hex characters: SHA-256 (seed, topic, customer_id, aur zaroorat par ek extra hissa: profile_version ya usage ka band index) ka shuru ka hissa |
+| event_time | timestamp | simulated, ISO-8601 +05:00. Customer aur profile events mein signup band ka shuru, usage mein us band ka shuru |
 | schema_version | string | "1.0" |
 | source | string | "simulator" |
 
@@ -49,52 +52,57 @@ Pakistan ke events (14 August, Ramadan, Eid, cricket). Chand wali tareekhein off
 Kafka key aur S3 partition har topic ke naam ke saath. Topics ki setting: 6 partitions, replication 1, retention 30 din.
 
 ### customer_events (key=customer_id, partition signup_month=)
+Ek customer ka ek hi event, signup ke waqt. Step 4 mein bana (`simulator/customers/events.py`).
 
 | Field | Type | Note |
 |---|---|---|
-| customer_id | string | C0000001 |
-| signup_date | date | |
-| region, city | string | |
-| zone | string | **[tay karna hai]** doc section 10 mein hai, magar hum ne tay kiya tha ke zone tower_master se join hoga. Static, ek baar ka field hai, to home tower se nikal kar rakhna sasta hai. |
-
-**[tay hua]** customer_events mein zone nahi hoga. Customer ki connectivity badalti rehti hai (usage_events ka tower_id har band alag), is liye zone hamesha tower_id se tower_master se join hoga. Customer ke paas sirf home_tower_id rahega.
-
-
-| segment | string | prepaid / postpaid (simulator state mein `plan_type`) |
-| acquisition_channel | string | **[tay karna hai]** values aur taqseem |
-| device_type | string | **[tay karna hai]** values aur taqseem |
-| initial_balance | int | PKR |
-| home_tower_id | string | tower_master se link |
+| customer_id | string | C0000001 (numbering 1 se shuru) |
+| signup_date | date | signup band ki tareekh |
+| region, city | string | dono mein shehar ka wahi naam (jaise Islamabad_Rawalpindi), tower_master ke mutabiq |
+| zone | - | **[tay hua]** is event mein nahi. Customer ka tower badalta rehta hai (usage_events ka tower_id har band alag), is liye zone tower_id se tower_master se join hoga. Customer ke paas sirf home_tower_id hai |
+| segment | string | prepaid (88%) / postpaid (12%) (simulator state mein `plan_type`) |
+| acquisition_channel | string | **[tay hua]** retailer 55%, online 15%, campaign 15%, referral 10%, other 5% |
+| device_type | string | **[tay hua]** smartphone_android 62%, smartphone_ios 8%, feature_phone 30%. Value `device_type_for(cfg, n)` se aati hai (seed se, hamesha wahi), usage generator bhi yahi use karta hai |
+| initial_balance | float | PKR. Prepaid 50 se 500 (chhote zyada), postpaid 0. Pehle int likha tha, ab float (jaise 83.46), Silver mein cast hoga |
+| home_tower_id | string | tower_master se link, usi shehar ka tower |
 
 ### profile_events (key=customer_id, partition signup_month=)
+Ek customer ka ek record, signup ke waqt (version 1). Step 4 mein bana.
 
 | Field | Type | Note |
 |---|---|---|
 | customer_id | string | |
-| profile_version | int | |
-| age_band | string | **[tay karna hai]** |
-| gender | string | **[tay karna hai]** |
-| phone_masked | string | 0334-xxxx09 style |
-| cnic_masked | string | xxxxx-xxxxx45-7 style |
-| language_pref | string | **[tay karna hai]** |
-| arpu_band | string | **[tay karna hai]** |
+| profile_version | int | abhi 1 |
+| age_band | string | **[tay hua]** 18-24 (25%), 25-34 (35%), 35-44 (22%), 45-54 (12%), 55+ (6%) |
+| gender | string | **[tay hua]** male 60%, female 40% |
+| phone_masked | string | 0334-xxxx09 style, pattern `03dd-xxxxdd`. Shuru se hi masked, asli number kabhi nahi banta |
+| cnic_masked | string | xxxxx-xxxxx45-7 style, pattern `xxxxx-xxxxxdd-d`. Aakhri digit mard ke liye toh, aurat ke liye jufft |
+| language_pref | string | **[tay hua]** Urdu 65%, English 25%, Regional 10% |
+| arpu_band | string | **[tay hua]** low (300 PKR mahine se kam), mid (300 se 800), high (800 se zyada). Signup ke waqt ka andaza: prepaid 44/40/16, postpaid 10/40/50, overall ~40/40/20. Asli ARPU baad mein usage aur recharge se banega |
 
 ### usage_events (key=customer_id, partition event_date=)
-Har active customer, har din, har time band (Night 0-6, Morning 6-12, Afternoon 12-18, Evening 18-24) ka ek summary.
+Har ACTIVE customer, har din, har time band (Night 0-6, Morning 6-12, Afternoon 12-18, Evening 18-24) ka ek summary. Step 4 mein pehla sada version bana (`simulator/usage/`), asli rules Steps 5 se 7 mein.
 
 | Field | Type | Note |
 |---|---|---|
 | customer_id | string | |
 | event_date | date | simulated din |
 | time_band | string | Night / Morning / Afternoon / Evening |
-| tower_id | string | is band mein istemal hua tower (zyada tar home tower) |
-| calls_onnet_min, calls_offnet_min, calls_intl_min | int | anynet sirf package quota hai, usage mein alag field nahi (doc ke mutabiq) |
+| tower_id | string | **[tay hua]** 85% bands mein home tower, 15% mein home tower ke 3 qareebi (usi shehar) mein se ek. Qareebi tower na ho to home tower |
+| calls_onnet_min, calls_offnet_min, calls_intl_min | int | anynet sirf package quota hai, usage mein alag field nahi (doc ke mutabiq). Chhote average par zyada tar 0, kabhi 1 (Poisson) |
 | sms_count | int | |
-| data_mb_whatsapp, data_mb_social, data_mb_video, data_mb_browsing, data_mb_other | float | |
-| dropped_calls | int | |
-| active_package_ids | list[string] | jin packages ne is usage ko cover kiya |
-| spend_from_package | float | Step 7 se pehle khali |
-| spend_from_balance | float | PKR, Step 7 se pehle khali |
+| data_mb_whatsapp, data_mb_social, data_mb_video, data_mb_browsing, data_mb_other | float | 2 decimal tak. Feature phone ka data sirf data_mb_other mein (din ka 5 se 20 MB) |
+| dropped_calls | int | **[tay hua]** calls = (onnet + offnet + intl minutes) / 3, har call ke girne ka base chance 1.5% (code constant `BASE_DROP_RATE`). Step 5 mein tower health se barhega (DEGRADED ~3x, CRITICAL ~8x) |
+| active_package_ids | list[string] | Step 7 se pehle khali list |
+| spend_from_package | float | Step 7 se pehle null |
+| spend_from_balance | float | PKR, Step 7 se pehle null |
+
+Usage kitna hota hai (**[tay hua]**):
+- Persona device ke hisaab se: feature_phone sirf call_heavy (65%) ya sms_heavy (35%), smartphone call_heavy (15%), whatsapp_only (43%), data_heavy (42%). Overall ~30/10/30/30.
+- Roz ka average (onnet, offnet, intl min, SMS, data MB): call_heavy 40/30/1/5/300, sms_heavy 8/6/0.1/40/150, whatsapp_only 6/4/0.2/3/500, data_heavy 10/8/0.3/3/1500.
+- Din ka hissa bands mein: Night 10%, Morning 30%, Afternoon 25%, Evening 35%.
+- Customer ka apna fixed factor (0.5x se 1.8x) aur har band par ~25% upar neeche noise.
+- Naya customer usi band se usage dena shuru karta hai jis mein signup hua.
 
 ### recharge_events (key=customer_id, partition event_date=)
 customer_id, event_date, amount_pkr (int), channel (retailer / app / easypaisa / jazzcash / card), balance_before, balance_after (float). Recharge ki ginti aur average gap curated zone mein banenge.
@@ -147,3 +155,5 @@ Consumers bari gzip files likhte hain (batching 5000 records ya 60 seconds), chh
 ## 6. Simulator ki customer state (SQLite, publish nahi hoti)
 
 Persona (call-heavy, SMS-heavy, WhatsApp-only, data-heavy), price sensitivity, balance, active subscriptions (package_id, baqi quota, expiry, auto_renew), home tower, at-risk flag, last_active. Persona aur price sensitivity seed se dobara ban jate hain (alag column ki zaroorat nahi). Abhi `customer_state` table mein: customer_id, plan_type, status, status_since, balance, home_tower_id, last_active, at_risk.
+
+**[tay hua]** `city` ka column nahi rakha: city home_tower_id se tower_master se mil jati hai aur kabhi badalti nahi. `device_type` aur usage ka per-customer factor bhi SQLite mein nahi, seed se dobara ban jate hain (`device_type_for`, `persona_for`, `customer_factor`). Persona ab device ke hisaab se chuni jati hai (feature phone sirf call_heavy ya sms_heavy).
