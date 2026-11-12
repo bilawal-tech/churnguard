@@ -53,7 +53,12 @@ CUSTOMER_COLS = (
     "customer_id", "plan_type", "status", "status_since",
     "balance", "home_tower_id", "last_active", "at_risk",
 )
-
+TOWER_COLS = [
+    "tower_id", "health", "load", "signal_dbm", "precursor_active",
+    "failure_at", "precursor_start_hour", "dip_until_hour",
+    "down_until_hour", "outage_id", "outage_cause",
+    "outage_severity", "outage_affected_pct",
+]
 
 class StateStore:
     def __init__(self, path):
@@ -106,6 +111,36 @@ class StateStore:
             "SELECT * FROM customer_state WHERE customer_id=?", (customer_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    def upsert_towers(self, rows):
+         cols = ", ".join(TOWER_COLS)
+         marks = ", ".join(":" + c for c in TOWER_COLS)
+         updates = ", ".join(
+            f"{c}=excluded.{c}" for c in TOWER_COLS if c != "tower_id"
+        )
+         full = []
+         for row in rows:
+            item = {c: None for c in TOWER_COLS}
+            item["precursor_active"] = 0
+            item.update(row)
+            full.append(item)
+         self.conn.executemany(
+            f"INSERT INTO tower_state({cols}) VALUES({marks}) "
+            f"ON CONFLICT(tower_id) DO UPDATE SET {updates}",
+            full,
+        )
+
+    def get_tower(self, tower_id):
+        row = self.conn.execute(
+            "SELECT * FROM tower_state WHERE tower_id=?", (tower_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def all_towers(self):
+        rows = self.conn.execute(
+            "SELECT * FROM tower_state ORDER BY tower_id"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def count_customers(self):
         return self.conn.execute(
