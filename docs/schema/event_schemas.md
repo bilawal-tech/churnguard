@@ -19,7 +19,7 @@ Source: Claude Docs "ChurnGuard v2 - Phase 1 Schema and Simulator Design" (v1.1,
 | field_team_status_events | optional, hourly | team movement abhi nahi (fixed base), is liye nahi banega |
 | Profile aur customer ki values | **[tay karna hai]** | **[tay hua]** age_band, gender, language_pref, arpu_band, acquisition_channel, device_type ki taqseem neeche section 3 mein |
 | Customer burst | pehle 7 din, 20,000 | decaying burst, config key `customers.burst_decay` (0.8) |
-
+| tower_metrics fields | signal_strength_dbm, load_pct, dropped_call_rate, avg_data_speed_mbps, status | **[tay hua, Step 5]** health, signal_dbm, load, active_users, total_minutes, total_data_mb, dropped_calls (section 3). DOWN ghante mein event nahi banta |
 ## 1. Common envelope (har event mein)
 
 | Field | Type | Note |
@@ -117,12 +117,37 @@ customer_id, event_date, offer_id, offer_type, action (SENT / ACCEPTED / EXPIRED
 customer_id, event_date, from_status, to_status (ACTIVE / SUSPENDED / CHURNED / REACTIVATED), churn_reason (nullable, ground truth, model feature kabhi nahi), inactivity_days (nullable). Churn_reason ki values ki list doc mein nahi hai **[tay karna hai]**. At-risk chhupi state hai, publish nahi hoti.
 
 ### network_events (key=region, partition event_date=)
-Outage ka start aur end (ground truth).
-outage_id, region, tower_id (nullable, null = poore region ka outage), status (START / END), severity (int 1-3), affected_pct (float), cause (nullable: power cut, fibre cut, hardware, congestion).
+Outage ka start aur end (ground truth). **[tay hua, Step 5]** sirf tower-level, region-wide outage abhi nahi, is liye tower_id hamesha bhara hota hai.
+
+| Field | Type | Note |
+|---|---|---|
+| outage_id | string | `OUT-<tower_id>-<START ka ghante ka index>`, START aur END mein wahi |
+| region | string | tower ka region (Kafka key) |
+| tower_id | string | |
+| event_date | date | simulated din |
+| status | string | START (tower DOWN hua) / END (tower wapas aaya) |
+| severity | int | 1 se 3: affected_pct 3% se kam 1, 3% se 6% tak 2, 6% se zyada 3 |
+| affected_pct | float | START ke ghante par tower ke active_users / shehar ke kul active_users x 100. END mein wahi value |
+| cause | string | power_cut ya fibre_cut (achanak failure), hardware (dheere girne wali), congestion (dheere girne wali, aur failure se pehle 6 ghante mein load 1.0 se upar). END mein wahi value |
+
+END ka event_time wo ghanta hai jab tower wapas aaya. DOWN 3 se 12 ghante rehta hai.
 
 ### tower_metrics_events (key=tower_id, partition event_date=)
-Har tower ka har ghante ek snapshot.
-tower_id, event_date, signal_strength_dbm (float), load_pct (float, connected users / capacity), dropped_call_rate (float), avg_data_speed_mbps (float), status (HEALTHY / DEGRADED / CRITICAL / DOWN).
+Har tower ka har ghante ek snapshot, **sirf jab tower DOWN na ho** (DOWN sirf network_events mein dikhta hai). **[tay hua, Step 5]**
+
+| Field | Type | Note |
+|---|---|---|
+| tower_id | string | |
+| event_date | date | simulated din |
+| health | string | HEALTHY / DEGRADED / CRITICAL (DOWN kabhi nahi) |
+| signal_dbm | float | 1 decimal |
+| load | float | active_users / capacity_users, 3 decimal. 1.0 se upar ho sakta hai |
+| active_users | int | band ke usage events se, ghante ke weight ke hisaab se (~5% noise) |
+| total_minutes | int | band ka total x ghante ka weight |
+| total_data_mb | float | band ka total x ghante ka weight |
+| dropped_calls | int | band ka total, 6 ghanton mein poore numbers mein baanta hua |
+
+`precursor_active` aur `failure_at` kisi event mein nahi (chhupi state). Tower ke metrics ka jama usage se nikle tower total ke barabar nahi hota (DOWN ghante nahi ginte), Silver/Gold mein barabar maan kar kuch nahi banana. Purana `avg_data_speed_mbps` field nahi banta.
 
 ### complaint_events (baad mein)
 Semi/unstructured text, key=customer_id, tower_id ke saath. Baad ke phase mein design hoga.
@@ -131,16 +156,23 @@ Semi/unstructured text, key=customer_id, tower_id ke saath. Baad ke phase mein d
 - **tower_alert_events:** tower_id, lat, lon, city, region, predicted_or_actual_status, risk_score, last_hour_metrics, affected_customers, nearest_team_id, severity.
 - **tower_reassignment_events:** sirf schema, banenge nahi (customer_id, old_tower_id, new_tower_id, reason).
 
-## 4. Tower health states (config thresholds)
+## 4. Tower health states (Step 5, config thresholds)
 
 | State | Condition | Asar |
 |---|---|---|
-| HEALTHY | signal achha, load < 70% | normal |
-| DEGRADED | signal -95 dBm se kam ya load >= 85% | dropped calls barhte hain, speed girti hai |
-| CRITICAL | signal -105 dBm se kam ya load >= 100% | bohat dropped calls |
-| DOWN | tower band | us ke customers ka usage ruk jata hai |
+| HEALTHY | signal -95 dBm se upar | dropped_calls base chance (1x) |
+| DEGRADED | signal -95 se -105 dBm | dropped_calls 3x |
+| CRITICAL | signal -105 dBm se neeche | dropped_calls 8x |
+| DOWN | tower band (sirf failure model se) | dropped_calls 20x. Customer home ya qareebi tower par shift, koi na ho (ya ek tower wala shehar) to usi DOWN tower par |
 
-~70% failures se pehle signal 2-12 ghante dheere girta hai, ~30% achanak (power cut, fibre cut). Shor aur overlap jaan boojh kar: kuch DEGRADED towers khud theek ho jate hain, kuch HEALTHY achanak gir jate hain.
+Health signal se tay hoti hai, load se nahi. `degraded_load` (0.85) Step 5 mein istemal nahi hoti. Load sirf itna karta hai: 1.0 se upar ho to temporary dip ka chance 5x. **[tay hua]**
+
+Teen tarah ki kharabi (numbers code ke constants mein, `simulator/towers/model.py`):
+- **Achanak:** HEALTHY tower har ghante 0.01% chance se seedha DOWN (power_cut ya fibre_cut).
+- **Dheere girne wali (precursor):** signal tower ke apne baseline se -110 dBm tak seedha girta hai, 1 se 7 din mein, phir DOWN (hardware ya congestion). failure_precursor_share 0.7 se iski shuruat ka chance ~0.023% har ghante.
+- **Temporary dip (false alarm):** 0.016% har ghante (load 1.0 se upar ho to 5x), signal -96 se -103 dBm, 2 se 8 ghante, phir khud theek. Kabhi CRITICAL nahi.
+
+DOWN se recovery 3 se 12 ghante. Healthy signal: 3G -78, 4G -75, 5G -72 dBm, tower ka apna fixed offset (-5 se +5) aur ghante ka ~2 dBm noise. Threshold ke paas health kuch ghante upar neeche hoti rehti hai (jaan boojh kar overlap).
 
 ## 5. S3 raw layout (bucket churnguard-data-bilawal, ap-south-1)
 
@@ -155,5 +187,6 @@ Consumers bari gzip files likhte hain (batching 5000 records ya 60 seconds), chh
 ## 6. Simulator ki customer state (SQLite, publish nahi hoti)
 
 Persona (call-heavy, SMS-heavy, WhatsApp-only, data-heavy), price sensitivity, balance, active subscriptions (package_id, baqi quota, expiry, auto_renew), home tower, at-risk flag, last_active. Persona aur price sensitivity seed se dobara ban jate hain (alag column ki zaroorat nahi). Abhi `customer_state` table mein: customer_id, plan_type, status, status_since, balance, home_tower_id, last_active, at_risk.
+**[tay hua, Step 5]** Tower ki state SQLite `tower_state` mein (publish nahi hoti, sirf resume ke liye): tower_id, health, load, signal_dbm, precursor_active, failure_at, precursor_start_hour, dip_until_hour, down_until_hour, outage_id, outage_cause, outage_severity, outage_affected_pct, last_over_load_hour. Waqt ghante ke index mein (band_index x 6 + ghanta). `precursor_active` aur `failure_at` kisi event mein nahi jate.
 
 **[tay hua]** `city` ka column nahi rakha: city home_tower_id se tower_master se mil jati hai aur kabhi badalti nahi. `device_type` aur usage ka per-customer factor bhi SQLite mein nahi, seed se dobara ban jate hain (`device_type_for`, `persona_for`, `customer_factor`). Persona ab device ke hisaab se chuni jati hai (feature phone sirf call_heavy ya sms_heavy).
