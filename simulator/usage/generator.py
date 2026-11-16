@@ -37,7 +37,8 @@ FACTOR_SIGMA = 0.35
 FACTOR_MIN = 0.5
 FACTOR_MAX = 1.8
 BAND_NOISE = 0.25  # +/- 25%
-BASE_DROP_RATE = 0.015   # per call, healthy tower (Step 5 will multiply it)
+BASE_DROP_RATE = 0.015 
+DROP_MULTIPLIER = {"HEALTHY": 1, "DEGRADED": 3, "CRITICAL": 8, "DOWN": 20}  # per call, healthy tower (Step 5 will multiply it)
 MINUTES_PER_CALL = 3
 ROAM_SHARE = 0.15        # share of bands spent on a neighbor tower
 DATA_APPS = ("whatsapp", "social", "video", "browsing", "other")
@@ -72,8 +73,21 @@ def _pick_tower(rng, home_tower_id, neighbors):
         return near[int(rng.random() * len(near))]
     return home_tower_id
 
+def _shift_if_down(cfg, customer_id, clock, tower_id, home_tower_id,
+                   neighbors, tower_health):
+    """Chuna hua tower DOWN ho to home ya uske neighbor mein se jo DOWN na ho.
+    Koi na ho (ya neighbor hi na hon) to usi DOWN tower par rehta hai."""
+    if tower_health.get(tower_id) != "DOWN":
+        return tower_id
+    near = list(neighbors.get(home_tower_id) or [])
+    options = [t for t in [home_tower_id] + near
+               if tower_health.get(t) != "DOWN"]
+    if not options:
+        return tower_id
+    srng = make_rng(cfg["seed"], "usage_shift", customer_id, clock.index)
+    return options[int(srng.random() * len(options))]
 
-def build_usage_event(cfg, customer_id, home_tower_id, neighbors, clock):
+def build_usage_event(cfg, customer_id, home_tower_id, neighbors, clock, tower_health=None):
     """usage_events record for one customer in the band that `clock` points at."""
     n = customer_no(cfg, customer_id)
     persona = persona_for(cfg, n)
@@ -105,6 +119,14 @@ def build_usage_event(cfg, customer_id, home_tower_id, neighbors, clock):
     calls = int(round((onnet + offnet + intl) / MINUTES_PER_CALL))
     dropped = int(rng.binomial(calls, BASE_DROP_RATE))
     tower_id = _pick_tower(rng, home_tower_id, neighbors)
+    if tower_health:
+        tower_id = _shift_if_down(cfg, customer_id, clock, tower_id,
+                                  home_tower_id, neighbors, tower_health)
+        mult = DROP_MULTIPLIER.get(tower_health.get(tower_id), 1)
+        if mult != 1:
+            drng = make_rng(cfg["seed"], "usage_drop", customer_id, clock.index)
+            dropped = int(drng.binomial(calls, min(1.0, BASE_DROP_RATE * mult)))
+    
 
     return {
         "event_id": _event_id(cfg["seed"], "usage_events", customer_id, index),
