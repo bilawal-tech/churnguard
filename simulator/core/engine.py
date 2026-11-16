@@ -14,6 +14,7 @@ class BandContext:
         self.clock = clock
         self.store = store
         self.next_customer_no = next_customer_no
+        self.band_events = []
 
     def active_customer_ids(self):
         rows = self.store.conn.execute(
@@ -21,6 +22,10 @@ class BandContext:
             "WHERE status='ACTIVE' ORDER BY customer_id"
         ).fetchall()
         return [r["customer_id"] for r in rows]
+
+    def band_events_for(self, topic):
+        """Is band mein ab tak ke hooks ke events, sirf ek topic ke."""
+        return [e for t, e in self.band_events if t == topic]
 
 
 class Simulator:
@@ -56,6 +61,7 @@ class Simulator:
             ctx = BandContext(clock, self.store, next_no)
             with self.store.transaction():
                 events = []
+                ctx.band_events = events
                 for hook in self.hooks:
                     events.extend(hook(ctx))
                 self._write(events)
