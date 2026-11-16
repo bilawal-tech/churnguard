@@ -78,6 +78,7 @@ def initial_state(tower_id, baseline):
         "outage_cause": None,
         "outage_severity": None,
         "outage_affected_pct": None,
+        "last_over_load_hour": None,
     }
 
 

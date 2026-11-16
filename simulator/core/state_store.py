@@ -29,19 +29,20 @@ CREATE TABLE IF NOT EXISTS active_packages (
     PRIMARY KEY (customer_id, package_id)
 );
 CREATE TABLE IF NOT EXISTS tower_state (
-    tower_id            TEXT PRIMARY KEY,
-    health              TEXT NOT NULL,
-    load                REAL NOT NULL,
-    signal_dbm          REAL NOT NULL,
-    precursor_active    INTEGER NOT NULL DEFAULT 0,
-    failure_at          INTEGER,
+    tower_id             TEXT PRIMARY KEY,
+    health               TEXT NOT NULL,
+    load                 REAL NOT NULL,
+    signal_dbm           REAL NOT NULL,
+    precursor_active     INTEGER NOT NULL DEFAULT 0,
+    failure_at           INTEGER,
     precursor_start_hour INTEGER,
-    dip_until_hour      INTEGER,
-    down_until_hour     INTEGER,
-    outage_id           TEXT,
-    outage_cause        TEXT,
-    outage_severity     INTEGER,
-    outage_affected_pct REAL
+    dip_until_hour       INTEGER,
+    down_until_hour      INTEGER,
+    outage_id            TEXT,
+    outage_cause         TEXT,
+    outage_severity      INTEGER,
+    outage_affected_pct  REAL,
+    last_over_load_hour  INTEGER
 );
 CREATE TABLE IF NOT EXISTS sim_meta (
     key   TEXT PRIMARY KEY,
@@ -57,8 +58,9 @@ TOWER_COLS = [
     "tower_id", "health", "load", "signal_dbm", "precursor_active",
     "failure_at", "precursor_start_hour", "dip_until_hour",
     "down_until_hour", "outage_id", "outage_cause",
-    "outage_severity", "outage_affected_pct",
+    "outage_severity", "outage_affected_pct", "last_over_load_hour",
 ]
+
 
 class StateStore:
     def __init__(self, path):
@@ -113,18 +115,18 @@ class StateStore:
         return dict(row) if row else None
 
     def upsert_towers(self, rows):
-         cols = ", ".join(TOWER_COLS)
-         marks = ", ".join(":" + c for c in TOWER_COLS)
-         updates = ", ".join(
+        cols = ", ".join(TOWER_COLS)
+        marks = ", ".join(":" + c for c in TOWER_COLS)
+        updates = ", ".join(
             f"{c}=excluded.{c}" for c in TOWER_COLS if c != "tower_id"
         )
-         full = []
-         for row in rows:
+        full = []
+        for row in rows:
             item = {c: None for c in TOWER_COLS}
             item["precursor_active"] = 0
             item.update(row)
             full.append(item)
-         self.conn.executemany(
+        self.conn.executemany(
             f"INSERT INTO tower_state({cols}) VALUES({marks}) "
             f"ON CONFLICT(tower_id) DO UPDATE SET {updates}",
             full,
