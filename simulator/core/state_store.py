@@ -15,17 +15,18 @@ CREATE TABLE IF NOT EXISTS customer_state (
     at_risk        INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS active_packages (
-    customer_id    TEXT NOT NULL,
-    package_id     TEXT NOT NULL,
-    rem_onnet_min  REAL NOT NULL DEFAULT 0,
-    rem_offnet_min REAL NOT NULL DEFAULT 0,
-    rem_anynet_min REAL NOT NULL DEFAULT 0,
-    rem_intl_min   REAL NOT NULL DEFAULT 0,
-    rem_sms        REAL NOT NULL DEFAULT 0,
-    rem_data_mb    REAL NOT NULL DEFAULT 0,
-    rem_social_mb  REAL NOT NULL DEFAULT 0,
-    expires_at     INTEGER NOT NULL,
-    auto_renew     INTEGER NOT NULL DEFAULT 1,
+    customer_id     TEXT NOT NULL,
+    package_id      TEXT NOT NULL,
+    subscription_id TEXT NOT NULL,
+    rem_onnet_min   REAL NOT NULL DEFAULT 0,
+    rem_offnet_min  REAL NOT NULL DEFAULT 0,
+    rem_anynet_min  REAL NOT NULL DEFAULT 0,
+    rem_intl_min    REAL NOT NULL DEFAULT 0,
+    rem_sms         REAL NOT NULL DEFAULT 0,
+    rem_data_mb     REAL NOT NULL DEFAULT 0,
+    rem_social_mb   REAL NOT NULL DEFAULT 0,
+    expires_at      INTEGER NOT NULL,
+    auto_renew      INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (customer_id, package_id)
 );
 CREATE TABLE IF NOT EXISTS tower_state (
@@ -53,6 +54,12 @@ CREATE TABLE IF NOT EXISTS sim_meta (
 CUSTOMER_COLS = (
     "customer_id", "plan_type", "status", "status_since",
     "balance", "home_tower_id", "last_active", "at_risk",
+)
+PACKAGE_COLS = (
+    "customer_id", "package_id", "subscription_id",
+    "rem_onnet_min", "rem_offnet_min", "rem_anynet_min", "rem_intl_min",
+    "rem_sms", "rem_data_mb", "rem_social_mb",
+    "expires_at", "auto_renew",
 )
 TOWER_COLS = [
     "tower_id", "health", "load", "signal_dbm", "precursor_active",
@@ -113,6 +120,38 @@ class StateStore:
             "SELECT * FROM customer_state WHERE customer_id=?", (customer_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    def get_active_packages(self, customer_id):
+        rows = self.conn.execute(
+            "SELECT * FROM active_packages WHERE customer_id=? ORDER BY package_id",
+            (customer_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def all_active_packages(self):
+        rows = self.conn.execute(
+            "SELECT * FROM active_packages ORDER BY customer_id, package_id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_active_package(self, row):
+        cols = ", ".join(PACKAGE_COLS)
+        marks = ", ".join(":" + c for c in PACKAGE_COLS)
+        updates = ", ".join(
+            f"{c}=excluded.{c}" for c in PACKAGE_COLS
+            if c not in ("customer_id", "package_id")
+        )
+        self.conn.execute(
+            f"INSERT INTO active_packages({cols}) VALUES({marks}) "
+            f"ON CONFLICT(customer_id, package_id) DO UPDATE SET {updates}",
+            row,
+        )
+
+    def delete_active_package(self, customer_id, package_id):
+        self.conn.execute(
+            "DELETE FROM active_packages WHERE customer_id=? AND package_id=?",
+            (customer_id, package_id),
+        )
 
     def upsert_towers(self, rows):
         cols = ", ".join(TOWER_COLS)
