@@ -19,10 +19,13 @@ from simulator.masters.towers import add_neighbors, build_towers
 from simulator.towers import model
 from simulator.towers.hook import make_tower_hook
 from simulator.usage.hook import make_usage_hook
+from simulator.billing.hooks import make_package_hook, make_recharge_hook
+from simulator.masters.packages import build_packages
 
 TOPICS = ("customer_events", "profile_events", "usage_events")
 TOWER_TOPICS = ("tower_metrics_events", "network_events")
-ALL_TOPICS = TOPICS + TOWER_TOPICS
+BILLING_TOPICS = ("recharge_events", "package_events")
+ALL_TOPICS = TOPICS + TOWER_TOPICS + BILLING_TOPICS
 PHONE = re.compile(r"03\d{2}-xxxx\d{2}")
 CNIC = re.compile(r"xxxxx-xxxxx\d{2}-\d")
 LEAK = re.compile(r"\d{4}-\d{7}|\d{5}-\d{7}-\d")
@@ -46,14 +49,18 @@ class Run:
 
     def run(self, cfg, towers, stop_after=None):
         store = StateStore(self.db)
-        hooks = [make_customer_hook(cfg, towers), make_usage_hook(cfg, towers),
+        packages = build_packages()
+        hooks = [make_customer_hook(cfg, towers),
+                 make_package_hook(cfg, towers, packages),
+                 make_recharge_hook(cfg),
+                 make_usage_hook(cfg, towers, packages=packages),
                  make_tower_hook(cfg, towers)]
         Simulator(cfg, store, self.out, hooks=hooks).run(stop_after=stop_after)
         store.close()
 
     def text(self, topic):
-        return (self.out / f"{topic}.jsonl").read_text(encoding="utf-8")
-
+        path = self.out / f"{topic}.jsonl"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
     def events(self, topic):
         return [json.loads(line) for line in self.text(topic).splitlines()]
 
@@ -205,6 +212,53 @@ def main():
           metrics_dropped <= usage_dropped,
           f"metrics {metrics_dropped}, usage {usage_dropped}")
 
+        # 10. Billing events bane aur rakam/actions sahi.
+    recharges = main_run.events("recharge_events")
+    pkg_events = main_run.events("package_events")
+    actions = {e["action"] for e in pkg_events}
+    allowed = {"PURCHASE", "AUTO_RENEW", "AUTO_RENEW_OFF", "EXPIRE",
+               "QUOTA_EXHAUSTED", "ADDON_PURCHASE"}
+    recharge_ok = all(
+        e["amount_pkr"] >= 100
+        and e["channel"] in ("retailer", "easypaisa", "jazzcash", "app", "card")
+        and abs((e["balance_after"] - e["balance_before"]) - e["amount_pkr"]) < 0.01
+        and e["balance_before"] < 50.0
+        for e in recharges
+    )
+    package_ok = all(
+        e["action"] in allowed and e["price_pkr"] >= 0 and e["balance_after"] >= 0
+        for e in pkg_events
+    )
+    check("10 recharge aur package events bane, rakam aur actions sahi",
+          len(recharges) > 0 and "PURCHASE" in actions and recharge_ok and package_ok,
+          f"{len(recharges)} recharge, {len(pkg_events)} package events, "
+          f"actions {sorted(actions)}")
+
+    # 11. Usage mein package aur kharcha ki fields bhari hain.
+    usage = main_run.events("usage_events")
+    fields_ok = all(
+        isinstance(e["active_package_ids"], list)
+        and e["spend_from_package"] is not None and e["spend_from_package"] >= 0
+        and e["spend_from_balance"] is not None and e["spend_from_balance"] >= 0
+        for e in usage
+    )
+    with_pkg = sum(1 for e in usage if e["active_package_ids"])
+    check("11 usage mein active_package_ids aur spend fields bhari",
+          fields_ok and with_pkg > 0,
+          f"{with_pkg}/{len(usage)} usage events mein active package")
+
+    # 12. Balance kabhi 0 se neeche nahi, postpaid ka balance 0.
+    store = StateStore(main_run.db)
+    min_balance = store.conn.execute(
+        "SELECT MIN(balance) FROM customer_state").fetchone()[0]
+    post_bad = store.conn.execute(
+        "SELECT COUNT(*) FROM customer_state "
+        "WHERE plan_type='postpaid' AND balance != 0").fetchone()[0]
+    store.close()
+    check("12 balance 0 se neeche nahi, postpaid ka balance 0",
+          min_balance >= 0 and post_bad == 0,
+          f"sab se kam balance {min_balance}, postpaid jinka balance 0 nahi {post_bad}")
+    
     print(f"\n{sum(results)}/{len(results)} checks pass")
     print(f"Files: {main_run.out}")
     return 0 if all(results) else 1
