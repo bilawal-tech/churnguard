@@ -229,3 +229,18 @@ def test_quota_exhausted_detection(cfg):
     assert len(exhausted) == 1
     assert exhausted[0][0]["subscription_id"] == "SUB-S"
     assert rem_pkgs == []
+
+def test_dropped_calls_scale_with_minutes(cfg):
+     def run(balance):
+        cust = {"customer_id": "C0000001", "plan_type": "prepaid", "balance": balance}
+        usage = _sample_usage(onnet=10, offnet=4, sms=0, wa=0.0, soc=0.0,
+                              vid=0.0, brw=0.0, oth=0.0)
+        usage["dropped_calls"] = 4
+        apply_usage_billing(cfg, cust, [], {}, usage, band_idx_in_day=2, clock_index=2)
+        return usage
+
+     assert run(1000.0)["dropped_calls"] == 4   # balance kaafi, koi scale nahi
+     u = run(5.0)                               # 25 PKR kharcha, balance 5
+     assert u["calls_onnet_min"] + u["calls_offnet_min"] == 3
+     assert u["dropped_calls"] == 1             # 4 x 3/14 = 0.86, round 1
+     assert run(0.0)["dropped_calls"] == 0      # balance 0, minutes 0

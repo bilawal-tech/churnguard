@@ -321,6 +321,11 @@ def apply_usage_billing(
     if is_prepaid and oob_cost > balance:
         # Scale down the uncovered portion proportionally so balance stops at 0.0
         scale = balance / oob_cost if oob_cost > 0 else 0.0
+        old_minutes = (
+            usage_event["calls_onnet_min"]
+            + usage_event["calls_offnet_min"]
+            + usage_event["calls_intl_min"]
+        )
         usage_event["calls_onnet_min"] = int(round(usage_event["calls_onnet_min"] - onnet * (1.0 - scale)))
         usage_event["calls_offnet_min"] = int(round(usage_event["calls_offnet_min"] - offnet * (1.0 - scale)))
         usage_event["calls_intl_min"] = int(round(usage_event["calls_intl_min"] - intl * (1.0 - scale)))
@@ -330,6 +335,17 @@ def apply_usage_billing(
         usage_event["data_mb_video"] = round(max(0.0, usage_event["data_mb_video"] - vid_mb * (1.0 - scale)), 2)
         usage_event["data_mb_browsing"] = round(max(0.0, usage_event["data_mb_browsing"] - brw_mb * (1.0 - scale)), 2)
         usage_event["data_mb_other"] = round(max(0.0, usage_event["data_mb_other"] - oth_mb * (1.0 - scale)), 2)
+        new_minutes = (
+            usage_event["calls_onnet_min"]
+            + usage_event["calls_offnet_min"]
+            + usage_event["calls_intl_min"]
+        )
+        if old_minutes > 0:
+            usage_event["dropped_calls"] = int(
+                round(usage_event["dropped_calls"] * new_minutes / old_minutes)
+            )
+        else:
+            usage_event["dropped_calls"] = 0
         spend_from_balance = round(balance, 2)
         balance = 0.0
     elif is_prepaid:
