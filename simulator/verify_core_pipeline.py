@@ -2,12 +2,13 @@
 
 Run from the project root:  python -m simulator.verify_core_pipeline
 Only data/test_run*, and state/test_sim*.db are created and deleted here.
-Hooks: customers, usage, tower (in this order).
+Hooks: customers, package, recharge, usage, tower, lifecycle (in this order).
 """
 import json
 import re
 import shutil
 import sys
+from collections import Counter
 from datetime import datetime
 
 from simulator.common import ROOT, load_config
@@ -21,15 +22,22 @@ from simulator.towers.hook import make_tower_hook
 from simulator.usage.hook import make_usage_hook
 from simulator.billing.hooks import make_package_hook, make_recharge_hook
 from simulator.masters.packages import build_packages
+from simulator.lifecycle import model as lifecycle_model
+from simulator.lifecycle.hooks import make_lifecycle_hook
 
 TOPICS = ("customer_events", "profile_events", "usage_events")
 TOWER_TOPICS = ("tower_metrics_events", "network_events")
 BILLING_TOPICS = ("recharge_events", "package_events")
-ALL_TOPICS = TOPICS + TOWER_TOPICS + BILLING_TOPICS
+LIFECYCLE_TOPICS = ("lifecycle_events",)
+ALL_TOPICS = TOPICS + TOWER_TOPICS + BILLING_TOPICS + LIFECYCLE_TOPICS
 PHONE = re.compile(r"03\d{2}-xxxx\d{2}")
 CNIC = re.compile(r"xxxxx-xxxxx\d{2}-\d")
 LEAK = re.compile(r"\d{4}-\d{7}|\d{5}-\d{7}-\d")
 RESUME_AFTER = 7  # bands before the simulated stop
+VALID_TRANSITIONS = {
+    ("ACTIVE", "SUSPENDED"), ("ACTIVE", "CHURNED"),
+    ("SUSPENDED", "CHURNED"), ("SUSPENDED", "REACTIVATED"),
+}
 
 
 class Run:
@@ -54,13 +62,15 @@ class Run:
                  make_package_hook(cfg, towers, packages),
                  make_recharge_hook(cfg),
                  make_usage_hook(cfg, towers, packages=packages),
-                 make_tower_hook(cfg, towers)]
+                 make_tower_hook(cfg, towers),
+                 make_lifecycle_hook(cfg)]
         Simulator(cfg, store, self.out, hooks=hooks).run(stop_after=stop_after)
         store.close()
 
     def text(self, topic):
         path = self.out / f"{topic}.jsonl"
         return path.read_text(encoding="utf-8") if path.exists() else ""
+
     def events(self, topic):
         return [json.loads(line) for line in self.text(topic).splitlines()]
 
@@ -72,6 +82,36 @@ def expected_counts(cfg):
         customers += new_customers_in_band(cfg, index)
         usage += customers
     return customers, usage
+
+
+def band_of(cfg, event):
+    """Event ka band index (event_time se)."""
+    start = SimClock.from_config(cfg, index=0).band_start
+    hours = (datetime.fromisoformat(event["event_time"]) - start).total_seconds() / 3600
+    return round(hours / 6)
+
+
+def quiet_bands(cfg, lifecycle):
+    """{customer_id: set(band)} jin bands mein customer SUSPENDED ya CHURNED tha.
+
+    Faisla Evening band ke aakhir mein hota hai, is liye us band ka usage ho chuka
+    hota hai; usage agle band se band hoti hai aur agli tabdili ke band tak (shamil).
+    """
+    total = cfg["history_days"] * BANDS_PER_DAY
+    by_customer = {}
+    for e in lifecycle:
+        by_customer.setdefault(e["customer_id"], []).append(
+            (band_of(cfg, e), e["to_status"]))
+    quiet = {}
+    for cid, items in by_customer.items():
+        items.sort()
+        bands = set()
+        for i, (band, status) in enumerate(items):
+            if status in ("SUSPENDED", "CHURNED"):
+                end = items[i + 1][0] if i + 1 < len(items) else total - 1
+                bands.update(range(band + 1, end + 1))
+        quiet[cid] = bands
+    return quiet
 
 
 def main():
@@ -91,6 +131,13 @@ def main():
     # outages dikhein. Asli constants (towers/model.py) nahi badalte.
     model.SUDDEN_RATE = 0.01
     model.DIP_RATE = 0.01
+
+    # Sirf is script ke liye: churn aur inactivity ki hadein chhoti, taake 5 din mein
+    # bhi lifecycle events dikhein. Asli constants (lifecycle/model.py) nahi badalte.
+    lifecycle_model.BASE_DAILY_CHURN = 0.05
+    lifecycle_model.INACTIVE_SUSPEND_DAYS = 2
+    lifecycle_model.INACTIVE_CHURN_DAYS = 4
+    lifecycle_model.REACTIVATE_CHANCE_PER_DAY = 0.3
 
     main_run, repeat, resume = runs["main"], runs["repeat"], runs["resume"]
     main_run.run(cfg, towers)
@@ -115,7 +162,10 @@ def main():
           len(same) == len(ALL_TOPICS),
           f"{len(same)}/{len(ALL_TOPICS)} topics bilkul same")
 
-    # 3. Counts.
+    # 3. Counts (usage: SUSPENDED/CHURNED customers ke bands nikal kar).
+    lifecycle = main_run.events("lifecycle_events")
+    quiet = quiet_bands(cfg, lifecycle)
+    skipped = sum(len(b) for b in quiet.values())
     exp_customers, exp_usage = expected_counts(cfg)
     store = StateStore(main_run.db)
     in_db = store.count_customers()
@@ -125,11 +175,12 @@ def main():
     ok = (in_db == exp_customers and next_no == exp_customers + 1
           and got["customer_events"] == exp_customers
           and got["profile_events"] == exp_customers
-          and got["usage_events"] == exp_usage)
+          and got["usage_events"] + skipped == exp_usage)
     check("3 ginti theek", ok,
           f"customers {in_db} (chahiye {exp_customers}), "
           f"customer/profile events {got['customer_events']}/{got['profile_events']}, "
-          f"usage {got['usage_events']} (chahiye {exp_usage})")
+          f"usage {got['usage_events']} + band-band {skipped} "
+          f"(chahiye {exp_usage})")
 
     # 4. Common envelope on every event; event ids unique inside a topic.
     problems = 0
@@ -212,17 +263,20 @@ def main():
           metrics_dropped <= usage_dropped,
           f"metrics {metrics_dropped}, usage {usage_dropped}")
 
-        # 10. Billing events bane aur rakam/actions sahi.
+    # 10. Billing events bane aur rakam/actions sahi (reactivation recharge shamil).
     recharges = main_run.events("recharge_events")
     pkg_events = main_run.events("package_events")
     actions = {e["action"] for e in pkg_events}
     allowed = {"PURCHASE", "AUTO_RENEW", "AUTO_RENEW_OFF", "EXPIRE",
                "QUOTA_EXHAUSTED", "ADDON_PURCHASE"}
+    reactivated = {(e["customer_id"], e["event_time"])
+                   for e in lifecycle if e["to_status"] == "REACTIVATED"}
     recharge_ok = all(
         e["amount_pkr"] >= 100
         and e["channel"] in ("retailer", "easypaisa", "jazzcash", "app", "card")
         and abs((e["balance_after"] - e["balance_before"]) - e["amount_pkr"]) < 0.01
-        and e["balance_before"] < 50.0
+        and (e["balance_before"] < 50.0
+             or (e["customer_id"], e["event_time"]) in reactivated)
         for e in recharges
     )
     package_ok = all(
@@ -258,7 +312,38 @@ def main():
     check("12 balance 0 se neeche nahi, postpaid ka balance 0",
           min_balance >= 0 and post_bad == 0,
           f"sab se kam balance {min_balance}, postpaid jinka balance 0 nahi {post_bad}")
-    
+
+    # 13. lifecycle_events sahi: tabdiliyan, zanjeer, churn_reason sirf CHURNED par.
+    reasons = set(lifecycle_model.CHURN_REASONS)
+    counts = Counter(e["to_status"] for e in lifecycle)
+    life_ok = all(
+        (e["from_status"], e["to_status"]) in VALID_TRANSITIONS
+        and e["customer_id"] in known_customers
+        and (e["churn_reason"] in reasons if e["to_status"] == "CHURNED"
+             else e["churn_reason"] is None)
+        for e in lifecycle
+    )
+    by_customer = {}
+    for e in lifecycle:
+        by_customer.setdefault(e["customer_id"], []).append(e)
+    chain_ok = True
+    for items in by_customer.values():
+        current = "ACTIVE"
+        for e in sorted(items, key=lambda x: band_of(cfg, x)):
+            if e["from_status"] != current:
+                chain_ok = False
+            current = "ACTIVE" if e["to_status"] == "REACTIVATED" else e["to_status"]
+    check("13 lifecycle_events sahi (tabdiliyan, zanjeer, churn_reason sirf CHURNED par)",
+          counts["CHURNED"] > 0 and life_ok and chain_ok,
+          f"{dict(counts)}, tabdiliyan {life_ok}, zanjeer {chain_ok}")
+
+    # 14. SUSPENDED ya CHURNED customer ki usage band rehti hai.
+    bad_usage = sum(
+        1 for e in usage if band_of(cfg, e) in quiet.get(e["customer_id"], ())
+    )
+    check("14 SUSPENDED/CHURNED customer ka usage event nahi", bad_usage == 0,
+          f"{bad_usage} galat usage events, {skipped} band-band band")
+
     print(f"\n{sum(results)}/{len(results)} checks pass")
     print(f"Files: {main_run.out}")
     return 0 if all(results) else 1
