@@ -23,6 +23,7 @@ PRICE_WEIGHT = 0.6
 # --- usage girawat: 7 din vs 28 din ka hafta-wari average ---
 USAGE_WINDOW_DAYS = 7
 HISTORY_DAYS = 28
+MIN_HISTORY_DAYS = 14            # isse kam history ho to usage adder nahi
 USAGE_DROP_START = 0.5           # 7 din ka usage average ke 50% se kam ho to adder
 USAGE_MAX_ADDER = 2.0            # usage 0 ho to ye adder
 
