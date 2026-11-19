@@ -12,8 +12,20 @@ CREATE TABLE IF NOT EXISTS customer_state (
     balance        REAL NOT NULL,
     home_tower_id  TEXT NOT NULL,
     last_active    INTEGER NOT NULL,
-    at_risk        INTEGER NOT NULL DEFAULT 0
+    at_risk        INTEGER NOT NULL DEFAULT 0,
+    zero_balance_since INTEGER,
+    at_risk_since      INTEGER
 );
+CREATE TABLE IF NOT EXISTS customer_daily (
+    customer_id   TEXT NOT NULL,
+    day           INTEGER NOT NULL,
+    usage         REAL NOT NULL DEFAULT 0,
+    calls         INTEGER NOT NULL DEFAULT 0,
+    dropped_calls INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (customer_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_customer_daily_day ON customer_daily(day);
+
 CREATE TABLE IF NOT EXISTS active_packages (
     customer_id     TEXT NOT NULL,
     package_id      TEXT NOT NULL,
