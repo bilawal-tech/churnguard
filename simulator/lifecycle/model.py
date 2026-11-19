@@ -29,8 +29,9 @@ USAGE_MAX_ADDER = 2.0            # usage 0 ho to ye adder
 
 # --- network: 7 din ka dropped_calls / calls ratio ---
 NETWORK_NORMAL_RATIO = 0.03
-NETWORK_FULL_RATIO = 0.25
+NETWORK_FULL_RATIO = 0.15
 NETWORK_MAX_ADDER = 2.0
+NETWORK_MIN_CALLS = 20           # isse kam calls ho to ratio par bharosa nahi     # isse kam calls ho to ratio par bharosa nahi
 
 # --- zero balance (sirf prepaid) ---
 ZERO_BALANCE_FULL_DAYS = 14
@@ -47,6 +48,8 @@ REACTIVATE_CHANCE_PER_DAY = 0.03
 AT_RISK_THRESHOLD = 1.0          # risk_score is se upar ho to at_risk = 1
 AT_RISK_CHURN_MULTIPLIER = 2.0
 AT_RISK_RECOVER_DAYS = 14
+AT_RISK_USAGE_FACTOR = 0.4       # at-risk customer ka usage is hisse par
+AT_RISK_RECHARGE_CHANCE = 0.15   # at-risk customer ka recharge chance (balance < 50 par)
 
 # --- churn_reason (ground truth, model features mein kabhi nahi) ---
 HIGH_PRICE = "HIGH_PRICE"

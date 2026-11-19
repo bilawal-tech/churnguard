@@ -15,6 +15,7 @@ from simulator.billing.events import (
 )
 from simulator.common import make_rng
 from simulator.usage.generator import customer_no
+from simulator.lifecycle.model import AT_RISK_RECHARGE_CHANCE
 
 
 def _tower_city_map(towers):
@@ -167,6 +168,10 @@ def make_recharge_hook(cfg):
             cust = dict(r)
             cid = cust["customer_id"]
             n = customer_no(cfg, cid)
+            if cust["at_risk"]:
+                skip_rng = make_rng(cfg["seed"], "recharge_skip", n, ctx.clock.index)
+                if skip_rng.random() >= AT_RISK_RECHARGE_CHANCE:
+                    continue
             bal_before = float(cust["balance"])
             amount, channel = choose_recharge(cfg, n, "prepaid", ctx.clock.index)
             bal_after = round(bal_before + amount, 2)

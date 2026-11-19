@@ -2,7 +2,8 @@
 from simulator.billing.engine import apply_usage_billing
 from simulator.billing.events import build_package_event
 from simulator.usage.generator import build_usage_event, neighbor_map
-
+from simulator.lifecycle.engine import scale_usage_event
+from simulator.lifecycle.model import AT_RISK_USAGE_FACTOR
 
 def make_usage_hook(cfg, towers, packages=None):
     """Return a hook(ctx) for the engine.
@@ -38,6 +39,8 @@ def make_usage_hook(cfg, towers, packages=None):
                 cfg, cid, cust["home_tower_id"], neighbors,
                 ctx.clock, tower_health=health,
             )
+            if cust["at_risk"]:
+                scale_usage_event(ev, AT_RISK_USAGE_FACTOR)
 
             active_pkgs = pkgs_by_cust.get(cid, [])
             old_pkg_ids = {p["package_id"] for p in active_pkgs}

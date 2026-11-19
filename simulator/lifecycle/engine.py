@@ -32,7 +32,7 @@ def usage_adder(usage_7d, usage_28d, history_days):
 
 
 def network_adder(calls_7d, dropped_7d):
-    if calls_7d <= 0:
+    if calls_7d < m.NETWORK_MIN_CALLS:
         return 0.0
     ratio = dropped_7d / calls_7d
     if ratio <= m.NETWORK_NORMAL_RATIO:
@@ -40,6 +40,7 @@ def network_adder(calls_7d, dropped_7d):
     span = m.NETWORK_FULL_RATIO - m.NETWORK_NORMAL_RATIO
     frac = min(1.0, (ratio - m.NETWORK_NORMAL_RATIO) / span)
     return m.NETWORK_MAX_ADDER * frac
+
 
 
 def zero_balance_adder(days_at_zero):
@@ -107,3 +108,16 @@ def at_risk_next(at_risk, at_risk_since, risk_total, today):
             return 0, None
         return 1, at_risk_since
     return 0, None
+_INT_FIELDS = ("calls_onnet_min", "calls_offnet_min", "calls_intl_min",
+               "sms_count", "dropped_calls")
+_MB_FIELDS = ("data_mb_whatsapp", "data_mb_social", "data_mb_video",
+              "data_mb_browsing", "data_mb_other")
+
+
+def scale_usage_event(ev, factor):
+    """Usage event ko jagah par factor se scale karta hai (at-risk ka disengage)."""
+    for k in _INT_FIELDS:
+        ev[k] = int(round(ev[k] * factor))
+    for k in _MB_FIELDS:
+        ev[k] = round(ev[k] * factor, 2)
+    return ev
