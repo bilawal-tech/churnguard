@@ -14,10 +14,10 @@ PERSONA_SMARTPHONE = (
 
 # Per-day average use before noise: onnet, offnet, intl minutes, SMS, data MB.
 PERSONA_DAILY = {
-    "call_heavy":    {"onnet": 40, "offnet": 30, "intl": 1.0, "sms": 5,  "data_mb": 300},
-    "sms_heavy":     {"onnet": 8,  "offnet": 6,  "intl": 0.1, "sms": 40, "data_mb": 150},
-    "whatsapp_only": {"onnet": 6,  "offnet": 4,  "intl": 0.2, "sms": 3,  "data_mb": 500},
-    "data_heavy":    {"onnet": 10, "offnet": 8,  "intl": 0.3, "sms": 3,  "data_mb": 1500},
+    "call_heavy":    {"onnet": 6,   "offnet": 2.2, "intl": 0.015, "sms": 2,  "data_mb": 30},
+    "sms_heavy":     {"onnet": 1.5, "offnet": 0.7, "intl": 0.008, "sms": 10, "data_mb": 20},
+    "whatsapp_only": {"onnet": 1.1, "offnet": 0.6, "intl": 0.008, "sms": 1,  "data_mb": 75},
+    "data_heavy":    {"onnet": 1.5, "offnet": 0.7, "intl": 0.008, "sms": 1,  "data_mb": 210},
 }
 
 # Share of data MB per app type.

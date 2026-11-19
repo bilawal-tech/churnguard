@@ -22,15 +22,15 @@ RECHARGE_CHANNELS = (
 
 # Package purchase rules
 NO_PACKAGE_SHARE = 0.15
-PACKAGE_BUY_CHANCE = 0.60
-AUTO_RENEW_ON_CHANCE = 0.60
+PACKAGE_BUY_CHANCE = 0.065
+AUTO_RENEW_ON_CHANCE = 0.20
 ADDON_BUY_CHANCE = 0.50
 
 PERSONA_PKG_TYPES = {
-    "call_heavy":    (("voice", 0.70), ("combo", 0.30)),
-    "sms_heavy":     (("voice", 0.50), ("combo", 0.50)),
-    "whatsapp_only": (("social", 0.80), ("data", 0.20)),
-    "data_heavy":    (("data", 0.60), ("combo", 0.40)),
+    "call_heavy":    (("combo", 0.80), ("voice", 0.20)),
+    "sms_heavy":     (("combo", 0.80), ("voice", 0.20)),
+    "whatsapp_only": (("combo", 0.60), ("social", 0.40)),
+    "data_heavy":    (("combo", 0.80), ("data", 0.20)),
 }
 
 # Out-of-bundle PKR rates (also used for Option A spend_from_package value)
@@ -101,7 +101,7 @@ def eligible_packages(packages, city, device, pkg_type):
     return sorted(out, key=lambda x: (x["price_pkr"], x["package_id"]))
 
 
-def choose_package(cfg, n, plan_type, city, packages):
+def choose_package(cfg, n, plan_type, city, packages, max_price=None):
     """Pick a deterministic preferred package for customer n based on persona & ARPU."""
     device = device_type_for(cfg, n)
     persona = persona_for(cfg, n)
@@ -117,7 +117,24 @@ def choose_package(cfg, n, plan_type, city, packages):
 
     chosen_type = _pick(rng, type_table)
     pool = eligible_packages(packages, city, device, chosen_type)
-    if not pool:
+    if max_price is not None:
+        pool = [p for p in pool if p["price_pkr"] <= max_price]
+        if not pool:
+            pool = [
+                p for p in eligible_packages(packages, city, device, "combo")
+                if p["price_pkr"] <= max_price
+            ]
+        if not pool:
+            pool = sorted(
+                (
+                    p
+                    for pkg_type in {p["package_type"] for p in packages}
+                    for p in eligible_packages(packages, city, device, pkg_type)
+                    if p["price_pkr"] <= max_price
+                ),
+                key=lambda p: (p["price_pkr"], p["package_id"]),
+            )
+    elif not pool:
         # Fallback to combo if chosen type has no regional match
         pool = eligible_packages(packages, city, device, "combo")
     if not pool:
@@ -129,11 +146,11 @@ def choose_package(cfg, n, plan_type, city, packages):
     for idx in range(k):
         pos = idx / max(1, k - 1)  # 0.0 (cheapest) to 1.0 (costliest)
         if arpu == "low":
-            w = 1.5 - pos
+            w = 2.0 - 1.8 * pos
         elif arpu == "mid":
-            w = 1.0 - abs(pos - 0.5)
+            w = 1.4 - 1.0 * pos
         else:
-            w = 0.5 + pos
+            w = 0.8 + 0.4 * pos
         weights.append(max(0.1, w))
     total_w = sum(weights)
     pick_val = rng.random() * total_w

@@ -129,6 +129,60 @@ def test_package_hook_expiry_and_auto_renew(cfg, towers, packages, tmp_path):
     store.close()
 
 
+def test_package_hook_buys_affordable_fallback(cfg, monkeypatch, tmp_path):
+    import simulator.billing.engine as billing_engine
+    import simulator.billing.hooks as billing_hooks
+
+    class ZeroRng:
+        def random(self):
+            return 0.0
+
+    monkeypatch.setattr(billing_engine, "device_type_for", lambda cfg, n: "smartphone")
+    monkeypatch.setattr(billing_engine, "persona_for", lambda cfg, n: "call_heavy")
+    monkeypatch.setattr(billing_engine, "arpu_band_for", lambda cfg, n, plan: "mid")
+    monkeypatch.setattr(billing_engine, "_pick", lambda rng, choices: "voice")
+    monkeypatch.setattr(billing_engine, "make_rng", lambda *args: ZeroRng())
+    monkeypatch.setattr(billing_hooks, "make_rng", lambda *args: ZeroRng())
+    monkeypatch.setattr(billing_hooks, "has_no_package_habit", lambda cfg, n: False)
+
+    def package(package_id, package_type, price):
+        return {
+            "package_id": package_id,
+            "package_type": package_type,
+            "price_pkr": price,
+            "validity_days": 7,
+            "region": ["all"],
+            "auto_renew_allowed": True,
+            "quota_onnet_min": 10,
+            "quota_offnet_min": 10,
+            "quota_anynet_min": 0,
+            "quota_intl_min": 0,
+            "quota_sms": 0,
+            "quota_data_mb": 0,
+            "quota_social_mb": 0,
+        }
+
+    packages = [
+        package("VOICE-100", "voice", 100),
+        package("COMBO-80", "combo", 80),
+        package("COMBO-50", "combo", 50),
+    ]
+    store = StateStore(tmp_path / "s.db")
+    store.upsert_customers([_cust_row("C0000001", balance=60.0, home="T1")])
+    ctx = SimpleNamespace(
+        clock=SimClock.from_config(cfg, index=0),
+        store=store,
+    )
+    with store.transaction():
+        events = make_package_hook(cfg, [{"tower_id": "T1", "city": "Lahore"}], packages)(ctx)
+
+    active = store.get_active_packages("C0000001")
+    assert [pkg["package_id"] for pkg in active] == ["COMBO-50"]
+    assert store.get_customer("C0000001")["balance"] == 10.0
+    assert any(event["action"] == "PURCHASE" for _, event in events)
+    store.close()
+
+
 def test_same_billing_run_twice_gives_same_events(cfg, towers, packages, tmp_path):
     run_billing_sim(cfg, towers, packages, tmp_path / "a", stop_after=8)
     run_billing_sim(cfg, towers, packages, tmp_path / "b", stop_after=8)

@@ -11,12 +11,14 @@ ChurnGuard is a configurable telecom customer-churn and tower-health early-warni
 | 3 | Simulator core (clock, state store, checkpoint, engine) | Done |
 | 4 | Customers, profiles and a first simple usage stream | Done |
 | 5 | Tower health (tower metrics, network events, health effect on usage) | Done |
-| 6-10 | Full usage rules, recharge and packages, lifecycle (churn), offers, dirty data | Planned |
+| 6 | Usage speed check (about 110 microseconds per event, no change needed) | Skipped |
+| 7 | Recharge, packages and spend (billing) | Done |
+| 8-10 | Lifecycle (churn), offers, dirty data | Planned |
 | 11-13 | Kafka producer, consumers and S3, full 180-day run and checks | Planned |
 
 After ingestion: Silver (cleansing), Gold (features), PostgreSQL, the four solutions (churn prediction, tower failure alerts, offers, complaints model), dashboard, and Docker.
 
-Step 4 produces `customer_events`, `profile_events` and `usage_events`. Step 5 adds `tower_metrics_events` (hourly) and `network_events` (outage START and END), and tower health now changes `dropped_calls` and moves customers off a DOWN tower. The usage stream still has no spend and no packages; those come in Steps 6 and 7.
+Step 4 produces `customer_events`, `profile_events` and `usage_events`. Step 5 adds `tower_metrics_events` (hourly) and `network_events` (outage START and END), and tower health now changes `dropped_calls` and moves customers off a DOWN tower. Step 7 adds `recharge_events` and `package_events` and fills `active_package_ids`, `spend_from_package` and `spend_from_balance` in `usage_events`.
 
 ## Architecture
 
@@ -65,9 +67,15 @@ flowchart TD
         CHOOK["hook.py<br/>burst and daily signups"]
     end
 
+    subgraph BIL["simulator/billing"]
+        BENG["engine.py<br/>package choice, recharge, quota and spend"]
+        BEVT["events.py<br/>recharge and package events"]
+        BHOOK["hooks.py<br/>package hook, recharge hook"]
+    end
+
     subgraph USE["simulator/usage"]
         UGEN["generator.py<br/>persona, usage event, health effect"]
-        UHOOK["hook.py<br/>usage per ACTIVE customer"]
+        UHOOK["hook.py<br/>usage and billing per ACTIVE customer"]
     end
 
     subgraph TWR["simulator/towers"]
@@ -84,7 +92,7 @@ flowchart TD
     end
 
     DB[("state/sim_state.db")]
-    HOOKS["hooks, in order<br/>customers, usage, tower (built)<br/>recharge, churn, offers (planned)"]
+    HOOKS["hooks, in order<br/>customers, package, recharge, usage, tower (built)<br/>churn, offers (planned)"]
     EVENTS[("JSONL event files")]
     VERIFY["simulator/verify_core_pipeline.py"]
 
@@ -100,6 +108,11 @@ flowchart TD
     UGEN --> UHOOK
     TOW -->|"tower list with neighbors"| UHOOK
     TOW -->|"tower list"| THOOK
+    PKG -->|"package list"| BHOOK
+    PKG -->|"package list"| UHOOK
+    BENG --> BHOOK
+    BEVT --> BHOOK
+    BENG -.->|"quota deduction, spend"| UHOOK
     TMODEL --> THOOK
     TEVT --> THOOK
     UHOOK -.->|"band usage events"| THOOK
@@ -110,6 +123,7 @@ flowchart TD
     STORE --> ENGINE
     STORE <--> DB
     CHOOK --> HOOKS
+    BHOOK --> HOOKS
     UHOOK --> HOOKS
     THOOK --> HOOKS
     ENGINE <--> HOOKS
@@ -120,7 +134,8 @@ flowchart TD
 - `common.py` is shared by everything: config loading, ID formats, and a seeded random generator per entity (`make_rng`), so the same entity always gets the same values.
 - The master builders read the config (and the Jazz package CSV) and `run_masters.py` writes them to `data/raw/`.
 - The customer generator uses the tower list to give each customer a home tower in their own city. `events.py` turns a new customer into `customer_events` and `profile_events` records. The customer hook decides how many customers sign up in each band.
-- The usage generator builds one usage record per customer per band. The usage hook runs it for every ACTIVE customer and passes the previous band's tower health. Towers passed to it must come from `add_neighbors(build_towers(cfg))`, so roaming to a neighbor tower works.
+- The billing engine holds the rules for choosing a package, recharging, taking usage from package quotas and charging the rest from balance. The package hook buys, renews and expires packages, and the recharge hook tops up prepaid customers with a low balance.
+- The usage generator builds one usage record per customer per band. The usage hook runs it for every ACTIVE customer, passes the previous band's tower health, and then applies the billing rules to fill the package and spend fields. Towers passed to it must come from `add_neighbors(build_towers(cfg))`, so roaming to a neighbor tower works.
 - The tower model decides signal, health and failures. The tower hook runs after the usage hook, uses this band's usage events to get each tower's traffic, and writes `tower_metrics_events` and `network_events`.
 - The engine combines the clock, the SQLite state store and the checkpoint, and calls hooks. Each hook returns `(topic, event)` pairs. `BandContext.band_events` lets a hook see the events of the hooks before it.
 
@@ -129,7 +144,9 @@ flowchart TD
 1. Open a SQLite transaction.
 2. Run each hook in order; each returns the events it produced.
    - Customer hook: signs up this band's new customers (SQLite row plus `customer_events` and `profile_events`).
-   - Usage hook: one `usage_events` record per ACTIVE customer, including customers who signed up in this same band. It reads the tower health saved at the end of the previous band.
+   - Package hook: expires, renews or buys packages for ACTIVE customers (`package_events`).
+   - Recharge hook: tops up prepaid customers whose balance is below 50 PKR (`recharge_events`).
+   - Usage hook: one `usage_events` record per ACTIVE customer, including customers who signed up in this same band. It reads the tower health saved at the end of the previous band, takes the usage from active package quotas first and charges the rest from balance (this can also write `package_events` for an exhausted package).
    - Tower hook: counts this band's traffic per tower from the usage events, runs six hourly steps per tower, writes `tower_metrics_events` and `network_events`, and saves the tower state.
 3. Append the events to JSONL files, one file per topic.
 4. Save the checkpoint (band index, next customer number) and commit the transaction.
@@ -156,11 +173,11 @@ Phone and CNIC are masked from the start (`0334-xxxx09`, `xxxxx-xxxxx45-7`). The
 
 **Usage.** One record per ACTIVE customer per band:
 
-- Each customer gets a persona from their device: feature phones are `call_heavy` or `sms_heavy` with almost no data; smartphones are `call_heavy`, `whatsapp_only` or `data_heavy`. The persona sets the daily average of on-net, off-net and international minutes, SMS and data (split into WhatsApp, social, video, browsing and other).
+- Each customer gets a persona from their device: feature phones are `call_heavy` or `sms_heavy` with almost no data; smartphones are `call_heavy`, `whatsapp_only` or `data_heavy`. The persona sets the daily average of on-net, off-net and international minutes, SMS and data (split into WhatsApp, social, video, browsing and other). After the Step 7 calibration the daily averages are lower (for example `call_heavy` about 6 on-net minutes and 30 MB a day).
 - A fixed per-customer factor (0.5x to 1.8x) and a per-band noise (about plus or minus 25%) make customers differ. A day's use is split across the bands as Night 10%, Morning 30%, Afternoon 25%, Evening 35%.
 - In 85% of bands the customer is on the home tower, otherwise on one of its three neighbor towers (same city). If the chosen tower is DOWN, the customer uses the home tower or a neighbor that is not DOWN; in a city with one tower the customer stays on the DOWN tower.
 - `dropped_calls`: calls are estimated as minutes divided by 3, and each call drops with a base chance of 1.5% on a healthy tower. This chance is multiplied by 3 (DEGRADED), 8 (CRITICAL) or 20 (DOWN).
-- `active_package_ids` is an empty list and `spend_from_package` and `spend_from_balance` are null until Step 7.
+- Usage is taken from the active package first, then charged from balance at out-of-bundle rates; the three package and spend fields are filled (Step 7).
 
 ## Tower health model (Step 5)
 
@@ -172,6 +189,13 @@ Each tower has a signal (dBm) and a health state: HEALTHY (above -95 dBm), DEGRA
 
 DOWN lasts 3 to 12 hours. Load is the band's real traffic (`active_users` from usage events divided by the tower's `capacity_users`), split over six hours with fixed weights. The hidden state (`precursor_active`, `failure_at`) stays in SQLite and is never published. Full details and numbers: `docs/core/step5_tower_health.md`.
 
+## Billing model (Step 7)
+
+- **Recharge:** a prepaid customer with a balance below 50 PKR recharges 100, 200, 300, 500 or 1000 PKR (by `arpu_band`) through retailer, easypaisa, jazzcash, app or card.
+- **Packages:** a customer with no active package buys one with a small chance per band (about 15% of customers never do). The type follows the persona, the price tier follows `arpu_band`, prepaid customers buy only what they can afford, and package regions are mapped to our eight cities. Packages can auto-renew, expire, run out of quota (and be bought again as an add-on). `package_events` has six actions.
+- **Spend:** quota is used first, then balance at out-of-bundle rates (on-net 1.5, off-net 2.5, international 15 PKR per minute, SMS 0.5 PKR, data 0.1 PKR per MB). `spend_from_package` is the value of the covered usage at those rates, not the PKR paid. A prepaid balance never goes below 0 (usage and `dropped_calls` are scaled down instead). Postpaid customers keep a balance of 0 and their bill is in `spend_from_balance`.
+- **Calibration:** in an 11-day run with about 20,000 customers, prepaid spend was about 796 PKR per month and 53% of customers held a package. Full details and numbers: `docs/core/step7_billing.md`.
+
 ## Project structure
 
 ```text
@@ -182,7 +206,7 @@ data/                   Generated output (git-ignored)
   reference/            Source snapshots used during development
   test_run*/            Output of the verification script
 docs/                   Project, schema, and data-flow documentation
-  core/                 Simulator core and tower health notes
+  core/                 Simulator core, tower health and billing notes
   master/               Master-data summary and data flow
   schema/               Event schemas (event_schemas.md)
   tools/                Package-data scraping notes
@@ -190,11 +214,12 @@ simulator/
   core/                 Four-band clock, simulation engine, checkpoints, state store
   customers/            Customer generator, customer and profile events, signup hook
   usage/                Usage generator and usage hook
+  billing/              Recharge and package rules, billing events, package and recharge hooks
   towers/               Tower health model, hourly and outage events, tower hook
   masters/              Tower, package, and field-team master builders
   common.py             Shared config, ID, and random-seed helpers
   run_masters.py        Master-data generation entry point
-  verify_core_pipeline.py   End-to-end check of the customer, usage and tower hooks
+  verify_core_pipeline.py   End-to-end check of the customer, billing, usage and tower hooks
 state/                  SQLite runtime state (git-ignored)
 tests/                  Automated tests
 tools/                  Source-checking and package-data scripts
@@ -211,6 +236,7 @@ tools/                  Source-checking and package-data scripts
 - **Shared device type:** `device_type_for(cfg, n)` gives the same device every time, so the customer event and the usage generator always agree.
 - **Hidden ground truth:** at-risk state, churn reasons, and the tower failure state (`precursor_active`, `failure_at`) are never published as events or model features.
 - **Tower traffic is real:** tower load comes from the band's usage events, not from a guess. Tower failures reach usage one band later. DOWN hours have no tower metrics event, so tower totals are not equal to totals taken from usage events.
+- **Real package prices:** package prices come from real Jazz packages and are much cheaper per unit than the out-of-bundle rates, so buying a package makes sense for customers.
 
 ## Setup
 
@@ -242,15 +268,15 @@ Run the test suite:
 python -m pytest tests -v
 ```
 
-Run the end-to-end check of the customer, usage and tower hooks (test config; it writes only to `data/test_run*` and `state/test_sim*.db` and deletes them first):
+Run the end-to-end check of the customer, billing, usage and tower hooks (test config; it writes only to `data/test_run*` and `state/test_sim*.db` and deletes them first):
 
 ```powershell
 python -m simulator.verify_core_pipeline
 ```
 
-It runs the simulator three times (normal, same seed again, stopped and resumed) and prints PASS or FAIL for nine checks: same seed gives the same events (all five topics), resume matches a full run, counts are right, every event has the common envelope, phone and CNIC are masked, there is no `zone` in `customer_events` and usage points to known customers and towers, every tower hour is either a metrics event or a DOWN hour, tower health values and START/END pairs are correct and no hidden state leaks into events, and tower `dropped_calls` is not more than the usage total. The script raises the failure rates for its own run so that the short test has outages; the real constants in `simulator/towers/model.py` do not change.
+It runs the simulator three times (normal, same seed again, stopped and resumed) and prints PASS or FAIL for twelve checks: same seed gives the same events (all seven topics), resume matches a full run, counts are right, every event has the common envelope, phone and CNIC are masked, there is no `zone` in `customer_events` and usage points to known customers and towers, every tower hour is either a metrics event or a DOWN hour, tower health values and START/END pairs are correct and no hidden state leaks into events, tower `dropped_calls` is not more than the usage total, recharge and package events are created with valid amounts and actions, the spend and package fields of `usage_events` are filled, and balances never go below 0 (postpaid stays at 0). The script raises the failure rates for its own run so that the short test has outages; the real constants in `simulator/towers/model.py` do not change.
 
-Master-data output is written under `data/raw/`. There is no command yet to run the full 180-day simulator; the engine runs from the tests and the verification script until the recharge, churn, offers and dirty-data hooks are added in Steps 6 to 10.
+Master-data output is written under `data/raw/`. There is no command yet to run the full 180-day simulator; the engine runs from the tests and the verification script until the churn, offers and dirty-data hooks are added in Steps 8 to 10.
 
 ## Configuration
 
@@ -266,12 +292,13 @@ Master-data output is written under `data/raw/`. There is no command yet to run 
 | `dirty_data` | Deliberate nulls, duplicates, and late events |
 | `kafka`, `s3` | Connection and batching settings |
 
-The profile shares, persona tables and usage constants live in code (`simulator/customers/events.py` and `simulator/usage/generator.py`), and the tower model constants (failure rates, durations, signal levels, hourly weights) live in `simulator/towers/model.py` and `simulator/towers/hook.py`, not in the config.
+The profile shares, persona tables and usage constants live in code (`simulator/customers/events.py` and `simulator/usage/generator.py`), the tower model constants (failure rates, durations, signal levels, hourly weights) live in `simulator/towers/model.py` and `simulator/towers/hook.py`, and the billing constants (recharge amounts and shares, channel shares, buying chances, out-of-bundle rates, region mapping) live in `simulator/billing/engine.py`, not in the config.
 
 ## Documentation
 
 - `docs/schema/event_schemas.md`: event and master schemas, Kafka keys, S3 partitions
 - `docs/core/step3_simulator_core.md`: simulator core design
 - `docs/core/step5_tower_health.md`: tower health design and numbers
+- `docs/core/step7_billing.md`: recharge, packages and spend design and numbers
 - `docs/master/`: master-data summary and data flow
 - `docs/tools/`: how the Jazz package data was collected

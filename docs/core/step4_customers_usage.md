@@ -94,10 +94,10 @@ One record per ACTIVE customer per band. Fields: `customer_id`, `event_date`, `t
 
 | Persona | On-net min | Off-net min | Intl min | SMS | Data MB |
 |---|---|---|---|---|---|
-| call_heavy | 40 | 30 | 1 | 5 | 300 |
-| sms_heavy | 8 | 6 | 0.1 | 40 | 150 |
-| whatsapp_only | 6 | 4 | 0.2 | 3 | 500 |
-| data_heavy | 10 | 8 | 0.3 | 3 | 1500 |
+| call_heavy | 6 | 2.2 | 0.015 | 2 | 30 |
+| sms_heavy | 1.5 | 0.7 | 0.008 | 10 | 20 |
+| whatsapp_only | 1.1 | 0.6 | 0.008 | 1 | 75 |
+| data_heavy | 1.5 | 0.7 | 0.008 | 1 | 210 |
 
 3. **Data split by app** (smartphones): call_heavy and sms_heavy: WhatsApp 40%, social 20%, browsing 25%, other 15%. whatsapp_only: WhatsApp 60%, social 15%, browsing 15%, other 10%. data_heavy: video 40%, social 20%, browsing 20%, WhatsApp 10%, other 10%.
 4. **Band share of the day:** Night 10%, Morning 30%, Afternoon 25%, Evening 35%.

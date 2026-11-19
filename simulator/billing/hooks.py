@@ -109,13 +109,16 @@ def make_package_hook(cfg, towers, packages):
                 continue
 
             city = tower_city.get(cust["home_tower_id"], "Other_cities")
-            pkg = choose_package(cfg, n, cust["plan_type"], city, packages)
+            is_prepaid = cust["plan_type"] == "prepaid"
+            balance = float(cust["balance"])
+            pkg = choose_package(
+                cfg, n, cust["plan_type"], city, packages,
+                max_price=balance if is_prepaid else None,
+            )
             if not pkg:
                 continue
 
-            is_prepaid = cust["plan_type"] == "prepaid"
             price = float(pkg["price_pkr"])
-            balance = float(cust["balance"])
             if is_prepaid and balance < price:
                 continue
 

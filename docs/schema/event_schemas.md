@@ -106,9 +106,11 @@ Usage kitna hota hai (**[tay hua]**):
 
 ### recharge_events (key=customer_id, partition event_date=)
 customer_id, event_date, amount_pkr (int), channel (retailer / app / easypaisa / jazzcash / card), balance_before, balance_after (float). Recharge ki ginti aur average gap curated zone mein banenge.
+**[tay hua, Step 7]** sirf prepaid, balance 50 PKR se kam ho to. amount_pkr 100/200/300/500/1000 (arpu_band se), channel: retailer 50, easypaisa 20, jazzcash 15, app 10, card 5 percent. Fields: envelope + customer_id, event_date, amount_pkr, channel, balance_before, balance_after.
 
 ### package_events (key=customer_id, partition event_date=)
 customer_id, event_date, subscription_id, action (PURCHASE / AUTO_RENEW / EXPIRE / QUOTA_EXHAUSTED / ADDON_PURCHASE / AUTO_RENEW_OFF), package_id (packages_master se link), price_pkr, validity_days, balance_after.
+**[tay hua, Step 7]** Fields: envelope + customer_id, event_date, subscription_id (`SUB-<customer_id>-<band_index>-<package_id>`), action, package_id, price_pkr, validity_days, balance_after. Saari 6 actions bani hain: PURCHASE, AUTO_RENEW, AUTO_RENEW_OFF, EXPIRE, QUOTA_EXHAUSTED, ADDON_PURCHASE (add-on = wahi package dobara, 50% chance).
 
 ### offer_events (key=customer_id, partition event_date=)
 customer_id, event_date, offer_id, offer_type, action (SENT / ACCEPTED / EXPIRED), group (treatment / control), trigger_rule (balance / usage_mix / weekend / event), campaign_name (nullable, jaise Eid). Control group aur frequency cap zaroori.
