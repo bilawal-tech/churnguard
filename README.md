@@ -196,6 +196,13 @@ DOWN lasts 3 to 12 hours. Load is the band's real traffic (`active_users` from u
 - **Spend:** quota is used first, then balance at out-of-bundle rates (on-net 1.5, off-net 2.5, international 15 PKR per minute, SMS 0.5 PKR, data 0.1 PKR per MB). `spend_from_package` is the value of the covered usage at those rates, not the PKR paid. A prepaid balance never goes below 0 (usage and `dropped_calls` are scaled down instead). Postpaid customers keep a balance of 0 and their bill is in `spend_from_balance`.
 - **Calibration:** in an 11-day run with about 20,000 customers, prepaid spend was about 796 PKR per month and 53% of customers held a package. Full details and numbers: `docs/core/step7_billing.md`.
 
+## Lifecycle and churn model (Step 8)
+
+- **Daily decision:** once a day, at the end of the Evening band, every ACTIVE customer gets a churn chance: a small base chance times (1 + risk score) times noise (prepaid; postpaid is half). The risk score adds up four parts: price (by `arpu_band`), usage drop (last 7 days against the 28-day weekly average), network quality (dropped calls over calls in the last 7 days) and zero balance (prepaid only).
+- **At-risk:** a hidden state (never published, never a model feature). A customer whose risk score crosses 1.0 uses 60% less and recharges rarely, and has twice the churn chance, until the score stays low for 14 days.
+- **Prepaid inactivity:** 14 days with no usage means SUSPENDED, 30 days means CHURNED. Postpaid has no balance, so it goes straight from ACTIVE to CHURNED. SUSPENDED customers can come back (REACTIVATED) with a recharge, 3% per day; CHURNED is final.
+- **Reasons:** `churn_reason` (HIGH_PRICE, POOR_NETWORK, USAGE_DECLINE, INACTIVITY, COMPETITOR_OFFER) is ground truth only. SUSPENDED and CHURNED customers produce no usage events. All numbers are starting values and will be tuned for a churn rate of about 26.5% in Step 13. Full details: `docs/core/step8_lifecycle.md`.
+
 ## Project structure
 
 ```text
@@ -206,7 +213,7 @@ data/                   Generated output (git-ignored)
   reference/            Source snapshots used during development
   test_run*/            Output of the verification script
 docs/                   Project, schema, and data-flow documentation
-  core/                 Simulator core, tower health and billing notes
+  core/                 Simulator core, tower health, billing and lifecycle notes
   master/               Master-data summary and data flow
   schema/               Event schemas (event_schemas.md)
   tools/                Package-data scraping notes

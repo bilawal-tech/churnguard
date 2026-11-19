@@ -106,7 +106,7 @@ Usage kitna hota hai (**[tay hua]**):
 
 ### recharge_events (key=customer_id, partition event_date=)
 customer_id, event_date, amount_pkr (int), channel (retailer / app / easypaisa / jazzcash / card), balance_before, balance_after (float). Recharge ki ginti aur average gap curated zone mein banenge.
-**[tay hua, Step 7]** sirf prepaid, balance 50 PKR se kam ho to. amount_pkr 100/200/300/500/1000 (arpu_band se), channel: retailer 50, easypaisa 20, jazzcash 15, app 10, card 5 percent. Fields: envelope + customer_id, event_date, amount_pkr, channel, balance_before, balance_after.
+**[tay hua, Step 7]** sirf prepaid, balance 50 PKR se kam ho to. amount_pkr 100/200/300/500/1000 (arpu_band se), channel: retailer 50, easypaisa 20, jazzcash 15, app 10, card 5 percent. Fields: envelope + customer_id, event_date, amount_pkr, channel, balance_before, balance_after. **[Step 8]** Ek aur raasta: SUSPENDED customer reactivation par recharge karta hai (lifecycle hook banata hai), us mein balance_before 50 se upar bhi ho sakta hai.
 
 ### package_events (key=customer_id, partition event_date=)
 customer_id, event_date, subscription_id, action (PURCHASE / AUTO_RENEW / EXPIRE / QUOTA_EXHAUSTED / ADDON_PURCHASE / AUTO_RENEW_OFF), package_id (packages_master se link), price_pkr, validity_days, balance_after.
@@ -116,7 +116,7 @@ customer_id, event_date, subscription_id, action (PURCHASE / AUTO_RENEW / EXPIRE
 customer_id, event_date, offer_id, offer_type, action (SENT / ACCEPTED / EXPIRED), group (treatment / control), trigger_rule (balance / usage_mix / weekend / event), campaign_name (nullable, jaise Eid). Control group aur frequency cap zaroori.
 
 ### lifecycle_events (key=customer_id, partition event_date=)
-customer_id, event_date, from_status, to_status (ACTIVE / SUSPENDED / CHURNED / REACTIVATED), churn_reason (nullable, ground truth, model feature kabhi nahi), inactivity_days (nullable). Churn_reason ki values ki list doc mein nahi hai **[tay karna hai]**. At-risk chhupi state hai, publish nahi hoti.
+**[tay hua, Step 8]** Fields: envelope + customer_id, event_date, from_status, to_status, churn_reason, inactivity_days. Tabdiliyan: ACTIVE se SUSPENDED (sirf prepaid, 14 din inactive, inactivity_days bhara), ACTIVE se CHURNED (risk se, churn_reason bhara, inactivity_days null), SUSPENDED se CHURNED (30 din inactive, churn_reason INACTIVITY, inactivity_days bhara), SUSPENDED se REACTIVATED (sirf ek event, customer seedha ACTIVE ho jata hai). Postpaid kabhi SUSPENDED nahi hota. churn_reason ki values: HIGH_PRICE, POOR_NETWORK, USAGE_DECLINE, INACTIVITY, COMPETITOR_OFFER (model feature kabhi nahi). Faisla roz ek baar Evening band ke aakhir mein, event_time us band ki shuruat hai. At-risk, zero_balance_since aur customer_daily chhupi state hain, publish nahi hoti.
 
 ### network_events (key=region, partition event_date=)
 Outage ka start aur end (ground truth). **[tay hua, Step 5]** sirf tower-level, region-wide outage abhi nahi, is liye tower_id hamesha bhara hota hai.
