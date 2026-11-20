@@ -1,10 +1,13 @@
 from simulator.common import load_config
+from simulator.billing.engine import arpu_band_for
 from simulator.core.clock import SimClock
 from simulator.core.engine import BandContext
 from simulator.core.state_store import StateStore
 from simulator.masters.packages import build_packages
 from simulator.offers.engine import is_control
+from simulator.offers.model import RECHARGE_TARGET_BY_BAND
 from simulator.offers.hooks import make_offer_hook
+from simulator.usage.generator import customer_no
 
 
 def _treatment_cid(seed):
@@ -114,6 +117,9 @@ def test_recharge_offer_accepts_and_grants_free_package(tmp_path):
     store = StateStore(str(tmp_path / "sim.db"))
     cid = _treatment_cid(cfg["seed"])
     _seed_customer(store, cid, balance=250.0)
+    target = RECHARGE_TARGET_BY_BAND[
+        arpu_band_for(cfg, customer_no(cfg, cid), "prepaid")
+    ]
 
     oid = f"OFR-{cid}-3-RECHARGE_BONUS"
     store.insert_offer({
@@ -124,8 +130,8 @@ def test_recharge_offer_accepts_and_grants_free_package(tmp_path):
         "sent_date": "2026-04-01",
         "window_end_date": "2026-04-08",
         "status": "OPEN",
-        "recharge_target": 300.0,
-        "recharge_total": 300.0,
+        "recharge_target": target,
+        "recharge_total": target,
     })
     store.conn.commit()
 

@@ -56,8 +56,9 @@ def _grant_package(cfg, ctx, cust, pdef, seq):
     cid = cust["customer_id"]
     pkg_id = pdef["package_id"]
     sub_id = subscription_id(cid, ctx.clock.index, pkg_id)
-    expires_at = ctx.clock.index + int(pdef["validity_days"]) * BANDS_PER_DAY
-    prow = init_active_package_row(cid, pkg_id, sub_id, pdef, expires_at, m.OFFER_PACKAGE_AUTO_RENEW)
+    prow = init_active_package_row(
+        cid, sub_id, pdef, ctx.clock.index, m.OFFER_PACKAGE_AUTO_RENEW
+    )
     ctx.store.upsert_active_package(prow)
     return ("package_events", build_package_event(
         cfg, cid, ctx.clock, sub_id, "PURCHASE", pdef, float(cust["balance"]), seq=seq,
@@ -177,11 +178,20 @@ def _evaluate_new_offers(cfg, ctx, packages, cust_map, arpu_cache, device_cache)
 
         daily_rows = ctx.store.get_offer_daily(cid, since_28)
         if daily_rows:
-            data_by_day = {date.fromisoformat(r["day"]): float(r["data_mb"]) for r in daily_rows}
-            call_by_day = {date.fromisoformat(r["day"]): float(r["call_min"]) for r in daily_rows}
-            if is_smart and e.weekly_rise(data_by_day, today) >= m.DATA_BOOST_RISE_RATIO:
+            day_idx = ctx.clock.day
+            data_by_day = {
+                day_idx - (today - date.fromisoformat(r["day"])).days: float(r["data_mb"])
+                for r in daily_rows
+            }
+            call_by_day = {
+                day_idx - (today - date.fromisoformat(r["day"])).days: float(r["call_min"])
+                for r in daily_rows
+            }
+            data_rise = e.weekly_rise(data_by_day, day_idx)
+            if is_smart and data_rise is not None and data_rise >= m.DATA_BOOST_RISE_RATIO:
                 due.append("DATA_BOOST")
-            if e.weekly_rise(call_by_day, today) >= m.CALL_BUNDLE_RISE_RATIO:
+            call_rise = e.weekly_rise(call_by_day, day_idx)
+            if call_rise is not None and call_rise >= m.CALL_BUNDLE_RISE_RATIO:
                 due.append("CALL_BUNDLE")
 
         if is_wknd:

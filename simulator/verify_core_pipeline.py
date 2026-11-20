@@ -2,7 +2,7 @@
 
 Run from the project root:  python -m simulator.verify_core_pipeline
 Only data/test_run*, and state/test_sim*.db are created and deleted here.
-Hooks: customers, package, recharge, usage, tower, lifecycle (in this order).
+Hooks: customers, package, recharge, usage, tower, offer, lifecycle (in this order).
 """
 import json
 import re
@@ -24,12 +24,16 @@ from simulator.billing.hooks import make_package_hook, make_recharge_hook
 from simulator.masters.packages import build_packages
 from simulator.lifecycle import model as lifecycle_model
 from simulator.lifecycle.hooks import make_lifecycle_hook
+from simulator.offers import model as offers_model
+from simulator.offers.hooks import make_offer_hook
+
 
 TOPICS = ("customer_events", "profile_events", "usage_events")
 TOWER_TOPICS = ("tower_metrics_events", "network_events")
 BILLING_TOPICS = ("recharge_events", "package_events")
 LIFECYCLE_TOPICS = ("lifecycle_events",)
-ALL_TOPICS = TOPICS + TOWER_TOPICS + BILLING_TOPICS + LIFECYCLE_TOPICS
+OFFER_TOPICS = ("offer_events",)
+ALL_TOPICS = TOPICS + TOWER_TOPICS + BILLING_TOPICS + LIFECYCLE_TOPICS + OFFER_TOPICS
 PHONE = re.compile(r"03\d{2}-xxxx\d{2}")
 CNIC = re.compile(r"xxxxx-xxxxx\d{2}-\d")
 LEAK = re.compile(r"\d{4}-\d{7}|\d{5}-\d{7}-\d")
@@ -63,6 +67,7 @@ class Run:
                  make_recharge_hook(cfg),
                  make_usage_hook(cfg, towers, packages=packages),
                  make_tower_hook(cfg, towers),
+                 make_offer_hook(cfg, packages),
                  make_lifecycle_hook(cfg)]
         Simulator(cfg, store, self.out, hooks=hooks).run(stop_after=stop_after)
         store.close()
@@ -344,6 +349,38 @@ def main():
     check("14 SUSPENDED/CHURNED customer ka usage event nahi", bad_usage == 0,
           f"{bad_usage} galat usage events, {skipped} band-band band")
 
+    # 15. Offer events control/treatment, action, trigger, aur package links.
+   # 15. Offer events control/treatment, action, trigger, aur package links.
+    offers = main_run.events("offer_events")
+    known_package_ids = {p["package_id"] for p in build_packages()}
+    purchased_package_ids = {
+        e["package_id"] for e in pkg_events
+        if e["action"] == "PURCHASE" and e["package_id"] is not None
+    }
+    groups = {e["group"] for e in offers}
+    offer_ok = (
+        len(offers) > 0
+        and {"treatment", "control"} <= groups
+        and all(e["action"] in {"SENT", "ACCEPTED", "EXPIRED", "HELD"} for e in offers)
+        and all(e["offer_type"] in set(offers_model.OFFER_TYPES) for e in offers)
+        and all(e["trigger_rule"] == offers_model.TRIGGER_RULE[e["offer_type"]] for e in offers)
+        and all(
+            e["action"] == "HELD" and e["package_id"] is None
+            for e in offers if e["group"] == "control"
+        )
+        and all(e["customer_id"] in known_customers for e in offers)
+        and all(
+            e["package_id"] is None or e["package_id"] in known_package_ids
+            for e in offers
+        )
+        and all(
+            e["package_id"] is None or e["package_id"] in purchased_package_ids
+            for e in offers if e["action"] == "ACCEPTED"
+        )
+    )
+    check("15 offer_events sahi (groups, actions, trigger_rule, package link)",
+          offer_ok,
+          f"{len(offers)} offers, groups {sorted(groups)}")
     print(f"\n{sum(results)}/{len(results)} checks pass")
     print(f"Files: {main_run.out}")
     return 0 if all(results) else 1
