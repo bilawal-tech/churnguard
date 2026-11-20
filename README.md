@@ -14,12 +14,13 @@ ChurnGuard is a configurable telecom customer-churn and tower-health early-warni
 | 6 | Usage speed check (about 110 microseconds per event, no change needed) | Skipped |
 | 7 | Recharge, packages and spend (billing) | Done |
 | 8 | Lifecycle (churn) | Done |
-| 9-10 | Offers, dirty data | Planned |
+| 9 | Offers and promotions (treatment/control holdout, daily triggers, `offer_events`) | Done |
+| 10 | Dirty data | Planned |
 | 11-13 | Kafka producer, consumers and S3, full 180-day run and checks | Planned |
 
 After ingestion: Silver (cleansing), Gold (features), PostgreSQL, the four solutions (churn prediction, tower failure alerts, offers, complaints model), dashboard, and Docker.
 
-Step 4 produces `customer_events`, `profile_events` and `usage_events`. Step 5 adds `tower_metrics_events` (hourly) and `network_events` (outage START and END), and tower health now changes `dropped_calls` and moves customers off a DOWN tower. Step 7 adds `recharge_events` and `package_events` and fills `active_package_ids`, `spend_from_package` and `spend_from_balance` in `usage_events`. Step 8 adds daily lifecycle decisions and `lifecycle_events`.
+Step 4 produces `customer_events`, `profile_events` and `usage_events`. Step 5 adds `tower_metrics_events` (hourly) and `network_events` (outage START and END), and tower health now changes `dropped_calls` and moves customers off a DOWN tower. Step 7 adds `recharge_events` and `package_events` and fills `active_package_ids`, `spend_from_package` and `spend_from_balance` in `usage_events`. Step 8 adds daily lifecycle decisions and `lifecycle_events`. Step 9 adds daily offer evaluation, treatment/control holdout, and `offer_events` (plus discounted or free `package_events` on acceptance).
 
 ## Architecture
 
@@ -92,15 +93,22 @@ flowchart TD
         LHOOK["hooks.py<br/>daily lifecycle decision"]
     end
 
+    subgraph OFF["simulator/offers"]
+        OMODEL["model.py<br/>offer types, rules, discounts, calendar"]
+        OENGINE["engine.py<br/>holdout, frequency cap, triggers, acceptance"]
+        OEVT["events.py<br/>offer_events"]
+        OHOOK["hooks.py<br/>daily offers, acceptance and expiry"]
+    end
+
     subgraph CORE["simulator/core"]
         CLOCK["clock.py<br/>SimClock"]
-        STORE["state_store.py<br/>StateStore, customer_daily, lifecycle state"]
+        STORE["state_store.py<br/>StateStore, customer_daily, offers, lifecycle state"]
         CKPT["checkpoint.py<br/>config_hash, resume"]
         ENGINE["engine.py<br/>Simulator, BandContext"]
     end
 
     DB[("state/sim_state.db")]
-    HOOKS["hooks, in order<br/>customers → package → recharge → usage → tower → lifecycle<br/>offers, dirty data (planned)"]
+    HOOKS["hooks, in order<br/>customers → package → recharge → usage → tower → offer → lifecycle<br/>dirty data (planned)"]
     EVENTS[("JSONL event files")]
     VERIFY["simulator/verify_core_pipeline.py"]
 
@@ -125,6 +133,14 @@ flowchart TD
     TEVT --> THOOK
     UHOOK -.->|"band usage events"| THOOK
     THOOK -.->|"tower health, next band"| UHOOK
+    PKG -->|"package list"| OHOOK
+    UHOOK -.->|"band usage events"| OHOOK
+    BHOOK -.->|"recharge events"| OHOOK
+    OMODEL --> OENGINE
+    OENGINE --> OHOOK
+    OEVT --> OHOOK
+    OHOOK -->|"offer state"| STORE
+    OHOOK --> HOOKS
     UHOOK -.->|"usage events"| LHOOK
     LMODEL --> LENGINE
     LENGINE --> LHOOK
@@ -153,6 +169,7 @@ flowchart TD
 - The billing engine holds the rules for choosing a package, recharging, taking usage from package quotas and charging the rest from balance. The package hook buys, renews and expires packages, and the recharge hook tops up prepaid customers with a low balance.
 - The usage generator builds one usage record per customer per band. The usage hook runs it for every ACTIVE customer, passes the previous band's tower health, and then applies the billing rules to fill the package and spend fields. Towers passed to it must come from `add_neighbors(build_towers(cfg))`, so roaming to a neighbor tower works.
 - The tower model decides signal, health and failures. The tower hook runs after the usage hook, uses this band's usage events to get each tower's traffic, and writes `tower_metrics_events` and `network_events`.
+- The offer hook runs after the tower hook and before the lifecycle hook. It records per-band usage and recharge activity, resolves open offers at the end of Evening, and evaluates new offers with a deterministic ~15% control holdout and a 7-day frequency cap.
 - The lifecycle hook runs last. It records each band's usage in `customer_daily`, makes the daily churn/inactivity decision at the end of Evening, updates hidden customer state, and emits `lifecycle_events`. Its status changes take effect from the next day's Night band.
 - The engine combines the clock, the SQLite state store and the checkpoint, and calls hooks. Each hook returns `(topic, event)` pairs. `BandContext.band_events` lets a hook see the events of the hooks before it.
 
@@ -165,6 +182,7 @@ flowchart TD
    - Recharge hook: tops up prepaid customers whose balance is below 50 PKR (`recharge_events`).
    - Usage hook: one `usage_events` record per ACTIVE customer, including customers who signed up in this same band. It reads the tower health saved at the end of the previous band, takes the usage from active package quotas first and charges the rest from balance (this can also write `package_events` for an exhausted package).
    - Tower hook: counts this band's traffic per tower from the usage events, runs six hourly steps per tower, writes `tower_metrics_events` and `network_events`, and saves the tower state.
+   - Offer hook: records this band's usage and recharge activity, and at the end of Evening resolves open offers then evaluates new offers. Treatment customers can receive `SENT`, `ACCEPTED` or `EXPIRED` records; control customers get `HELD` with no sent offer. The rules enforce 7-day frequency and one OPEN offer per customer.
    - Lifecycle hook (last): adds this band's usage to `customer_daily`; at the end of Evening it makes one daily lifecycle decision per customer and writes any `lifecycle_events`. A new status applies from the next day's Night band.
 3. Append the events to JSONL files, one file per topic.
 4. Save the checkpoint (band index, next customer number) and commit the transaction.
@@ -221,6 +239,12 @@ DOWN lasts 3 to 12 hours. Load is the band's real traffic (`active_users` from u
 - **Prepaid inactivity:** 14 days with no usage means SUSPENDED, 30 days means CHURNED. Postpaid has no balance, so it goes straight from ACTIVE to CHURNED. SUSPENDED customers can come back (REACTIVATED) with a recharge, 3% per day; CHURNED is final.
 - **Reasons:** `churn_reason` (HIGH_PRICE, POOR_NETWORK, USAGE_DECLINE, INACTIVITY, COMPETITOR_OFFER) is ground truth only. SUSPENDED and CHURNED customers produce no usage events. All numbers are starting values and will be tuned for a churn rate of about 26.5% in Step 13. Full details: `docs/core/step8_lifecycle.md`.
 
+## Offers and promotions model (Step 9)
+
+- **Six offer types:** `DATA_BOOST`, `CALL_BUNDLE`, `RECHARGE_BONUS`, `WEEKEND_SPECIAL`, `EVENT_OFFER` and `CRICKET_PACK`; the daily triggers use usage rise, low balance, weekends or 2026 calendar events (`Eid-ul-Adha`, `14 August`, `PSL`, `England Test`).
+- **Treatment/control holdout:** a deterministic ~15% of customers is held out as control (`HELD`, no offer sent); treatment customers receive `SENT`, then `ACCEPTED` or `EXPIRED`. The rules allow at most 1 offer per 7 days and at most 1 `OPEN` offer per customer at a time.
+- **Acceptance:** accepting a discounted package offer deducts the discounted price for prepaid customers and emits a non-auto-renewing `package_events` `PURCHASE`; reaching a `RECHARGE_BONUS` target grants a free reward package. Full details: `docs/core/step9_offers.md`.
+
 ## Project structure
 
 ```text
@@ -242,10 +266,11 @@ simulator/
   billing/              Recharge and package rules, billing events, package and recharge hooks
   towers/               Tower health model, hourly and outage events, tower hook
   lifecycle/            Churn risk, lifecycle events and daily lifecycle hook
+  offers/               Offer rules, treatment/control holdout, offer_events and offer hook
   masters/              Tower, package, and field-team master builders
   common.py             Shared config, ID, and random-seed helpers
   run_masters.py        Master-data generation entry point
-  verify_core_pipeline.py   End-to-end check of the customer, billing, usage, tower and lifecycle hooks
+  verify_core_pipeline.py   End-to-end check of the customer, billing, usage, tower, offer and lifecycle hooks
 state/                  SQLite runtime state (git-ignored)
 tests/                  Automated tests
 tools/                  Source-checking and package-data scripts
@@ -294,15 +319,15 @@ Run the test suite:
 python -m pytest tests -v
 ```
 
-Run the end-to-end check of the customer, billing, usage, tower and lifecycle hooks (test config; it writes only to `data/test_run*` and `state/test_sim*.db` and deletes them first):
+Run the end-to-end check of the customer, billing, usage, tower, offer and lifecycle hooks (test config; it writes only to `data/test_run*` and `state/test_sim*.db` and deletes them first):
 
 ```powershell
 python -m simulator.verify_core_pipeline
 ```
 
-It runs the simulator three times (normal, same seed again, stopped and resumed) and prints PASS or FAIL for fourteen checks. These cover same-seed output (all eight topics), resume matching a full run, event counts and envelopes, masked phone and CNIC, valid customer and tower references, tower metrics and outage pairs, hidden-state privacy, tower dropped-call totals, recharge and package validity, usage spend and package fields, non-negative balances, lifecycle transitions, and no usage for SUSPENDED or CHURNED customers. The script raises the failure rates for its own run so that the short test has outages; the real constants in `simulator/towers/model.py` do not change.
+It runs the simulator three times (normal, same seed again, stopped and resumed) and prints PASS or FAIL for fifteen checks. These cover same-seed output (all nine topics), resume matching a full run, event counts and envelopes, masked phone and CNIC, valid customer and tower references, tower metrics and outage pairs, hidden-state privacy, tower dropped-call totals, recharge and package validity, usage spend and package fields, non-negative balances, lifecycle transitions, no usage for SUSPENDED or CHURNED customers, and offer validation (`offer_events` groups, actions, trigger rules, and package purchase links). The script raises the failure rates for its own run so that the short test has outages; the real constants in `simulator/towers/model.py` do not change.
 
-Master-data output is written under `data/raw/`. There is no command yet to run the full 180-day simulator; the engine runs from the tests and verification script while the offers and dirty-data hooks remain to be added in Steps 9 and 10.
+Master-data output is written under `data/raw/`. There is no command yet to run the full 180-day simulator; the engine runs from the tests and verification script while the dirty-data hook remains to be added in Step 10.
 
 ## Configuration
 
@@ -326,5 +351,7 @@ The profile shares, persona tables and usage constants live in code (`simulator/
 - `docs/core/step3_simulator_core.md`: simulator core design
 - `docs/core/step5_tower_health.md`: tower health design and numbers
 - `docs/core/step7_billing.md`: recharge, packages and spend design and numbers
+- `docs/core/step8_lifecycle.md`: lifecycle, at-risk state and churn rules
+- `docs/core/step9_offers.md`: offers, treatment/control holdout and trigger rules
 - `docs/master/`: master-data summary and data flow
 - `docs/tools/`: how the Jazz package data was collected
