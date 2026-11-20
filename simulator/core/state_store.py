@@ -61,6 +61,33 @@ CREATE TABLE IF NOT EXISTS sim_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS offer_state (
+    offer_id            TEXT PRIMARY KEY,
+    customer_id         TEXT NOT NULL,
+    offer_type          TEXT NOT NULL,
+    grp                 TEXT NOT NULL,
+    package_id          TEXT,
+    campaign_name       TEXT,
+    discount_pct        REAL,
+    sent_date           TEXT NOT NULL,
+    window_end_date     TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    planned_accept_date TEXT,
+    recharge_target     REAL,
+    recharge_total      REAL NOT NULL DEFAULT 0,
+    closed_date         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_offer_state_cust_status ON offer_state(customer_id, status);
+CREATE INDEX IF NOT EXISTS idx_offer_state_status ON offer_state(status);
+
+CREATE TABLE IF NOT EXISTS offer_daily (
+    customer_id TEXT NOT NULL,
+    day         TEXT NOT NULL,
+    data_mb     REAL NOT NULL DEFAULT 0,
+    call_min    REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (customer_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_offer_daily_day ON offer_daily(day);
 """
 
 CUSTOMER_COLS = (
@@ -199,6 +226,82 @@ class StateStore:
         return self.conn.execute(
             "SELECT COUNT(*) FROM customer_state"
         ).fetchone()[0]
+
+    def insert_offer(self, row):
+        cols = [
+            "offer_id", "customer_id", "offer_type", "grp", "package_id",
+            "campaign_name", "discount_pct", "sent_date", "window_end_date",
+            "status", "planned_accept_date", "recharge_target",
+            "recharge_total", "closed_date",
+        ]
+        item = {c: None for c in cols}
+        item["recharge_total"] = 0.0
+        item.update(row)
+        marks = ", ".join(":" + c for c in cols)
+        self.conn.execute(
+            f"INSERT INTO offer_state({', '.join(cols)}) VALUES({marks})",
+            item,
+        )
+
+    def update_offer(self, offer_id, **fields):
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=:{k}" for k in fields)
+        params = dict(fields)
+        params["offer_id"] = offer_id
+        self.conn.execute(
+            f"UPDATE offer_state SET {sets} WHERE offer_id=:offer_id",
+            params,
+        )
+
+    def get_offer(self, offer_id):
+        row = self.conn.execute(
+            "SELECT * FROM offer_state WHERE offer_id=?", (offer_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def open_offers(self):
+        rows = self.conn.execute(
+            "SELECT * FROM offer_state WHERE status='OPEN' ORDER BY sent_date, offer_id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def open_offers_for(self, customer_id):
+        rows = self.conn.execute(
+            "SELECT * FROM offer_state WHERE customer_id=? AND status='OPEN' ORDER BY offer_id",
+            (customer_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def recent_offer_dates(self, customer_id, since_date):
+        rows = self.conn.execute(
+            "SELECT sent_date FROM offer_state WHERE customer_id=? AND sent_date>=? ORDER BY sent_date",
+            (customer_id, since_date),
+        ).fetchall()
+        return [r["sent_date"] for r in rows]
+
+    def add_offer_daily(self, customer_id, day, data_mb, call_min):
+        self.conn.execute(
+            "INSERT INTO offer_daily(customer_id, day, data_mb, call_min) "
+            "VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(customer_id, day) DO UPDATE SET "
+            "data_mb = offer_daily.data_mb + excluded.data_mb, "
+            "call_min = offer_daily.call_min + excluded.call_min",
+            (customer_id, day, float(data_mb), float(call_min)),
+        )
+
+    def get_offer_daily(self, customer_id, since_day):
+        rows = self.conn.execute(
+            "SELECT day, data_mb, call_min FROM offer_daily "
+            "WHERE customer_id=? AND day>=? ORDER BY day",
+            (customer_id, since_day),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_offer_daily(self, before_day):
+        self.conn.execute(
+            "DELETE FROM offer_daily WHERE day<?", (before_day,)
+        )
 
     def close(self):
         self.conn.close()
