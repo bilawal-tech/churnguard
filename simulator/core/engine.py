@@ -29,11 +29,12 @@ class BandContext:
 
 
 class Simulator:
-    def __init__(self, cfg, store, out_dir, hooks=None, sleep=time.sleep):
+    def __init__(self, cfg, store, out_dir, hooks=None, post_hooks=None, sleep=time.sleep):
         self.cfg = cfg
         self.store = store
         self.out_dir = Path(out_dir)
         self.hooks = hooks or []
+        self.post_hooks = post_hooks or []
         self.sleep = sleep
         self.checkpoint = Checkpoint(store, cfg)
 
@@ -64,6 +65,8 @@ class Simulator:
                 ctx.band_events = events
                 for hook in self.hooks:
                     events.extend(hook(ctx))
+                for post_hook in self.post_hooks:
+                    events = post_hook(ctx, events)
                 self._write(events)
                 self.checkpoint.save(clock.index + 1, ctx.next_customer_no)
             next_no = ctx.next_customer_no

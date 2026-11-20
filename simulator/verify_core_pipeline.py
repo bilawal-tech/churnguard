@@ -24,6 +24,8 @@ from simulator.billing.hooks import make_package_hook, make_recharge_hook
 from simulator.masters.packages import build_packages
 from simulator.lifecycle import model as lifecycle_model
 from simulator.lifecycle.hooks import make_lifecycle_hook
+from simulator.dirty.model import NULLABLE_FIELDS_BY_TOPIC
+from simulator.dirty.processor import make_dirty_processor
 from simulator.offers import model as offers_model
 from simulator.offers.hooks import make_offer_hook
 
@@ -59,7 +61,7 @@ class Run:
             if path.exists():
                 path.unlink()
 
-    def run(self, cfg, towers, stop_after=None):
+    def run(self, cfg, towers, stop_after=None, post_hooks=None):
         store = StateStore(self.db)
         packages = build_packages()
         hooks = [make_customer_hook(cfg, towers),
@@ -69,7 +71,9 @@ class Run:
                  make_tower_hook(cfg, towers),
                  make_offer_hook(cfg, packages),
                  make_lifecycle_hook(cfg)]
-        Simulator(cfg, store, self.out, hooks=hooks).run(stop_after=stop_after)
+        Simulator(
+            cfg, store, self.out, hooks=hooks, post_hooks=post_hooks
+        ).run(stop_after=stop_after)
         store.close()
 
     def text(self, topic):
@@ -128,6 +132,10 @@ def main():
                       ROOT / "state" / "test_sim_repeat.db"),
         "resume": Run(ROOT / "data" / "test_run_resume",
                       ROOT / "state" / "test_sim_resume.db"),
+        "dirty": Run(ROOT / "data" / "test_run_dirty",
+                     ROOT / "state" / "test_sim_dirty.db"),
+        "dirty_resume": Run(ROOT / "data" / "test_run_dirty_resume",
+                            ROOT / "state" / "test_sim_dirty_resume.db"),
     }
     for r in runs.values():
         r.clean()
@@ -145,10 +153,17 @@ def main():
     lifecycle_model.REACTIVATE_CHANCE_PER_DAY = 0.3
 
     main_run, repeat, resume = runs["main"], runs["repeat"], runs["resume"]
+    dirty, dirty_resume = runs["dirty"], runs["dirty_resume"]
     main_run.run(cfg, towers)
     repeat.run(cfg, towers)
     resume.run(cfg, towers, stop_after=RESUME_AFTER)
     resume.run(cfg, towers)  # new store and simulator = a restart
+    dirty.run(cfg, towers, post_hooks=[make_dirty_processor(cfg)])
+    dirty_resume.run(
+        cfg, towers, stop_after=RESUME_AFTER,
+        post_hooks=[make_dirty_processor(cfg)],
+    )
+    dirty_resume.run(cfg, towers, post_hooks=[make_dirty_processor(cfg)])
 
     results = []
 
@@ -381,6 +396,56 @@ def main():
     check("15 offer_events sahi (groups, actions, trigger_rule, package link)",
           offer_ok,
           f"{len(offers)} offers, groups {sorted(groups)}")
+
+    # 16. Dirty data nulls, duplicates, late delivery aur resume mein deterministic.
+    dirty_resume_same = sum(
+        dirty.text(topic) == dirty_resume.text(topic) for topic in ALL_TOPICS
+    )
+    clean_by_topic = {
+        topic: {e["event_id"]: e for e in main_run.events(topic)}
+        for topic in ALL_TOPICS
+    }
+    null_count = 0
+    envelope_null_count = 0
+    dup_count = 0
+    late_count = 0
+    envelope_fields = ("event_id", "event_time", "schema_version", "source")
+    for topic in ALL_TOPICS:
+        seen_ids = set()
+        max_seen_band = -1
+        for event in dirty.events(topic):
+            original = clean_by_topic[topic].get(event["event_id"], {})
+            null_count += sum(
+                field in event and event[field] is None
+                and original.get(field) is not None
+                for field in NULLABLE_FIELDS_BY_TOPIC.get(topic, ())
+            )
+            envelope_null_count += sum(
+                field in event and event[field] is None
+                for field in envelope_fields
+            )
+            event_id = event.get("event_id")
+            if event_id in seen_ids:
+                dup_count += 1
+            else:
+                seen_ids.add(event_id)
+            event_band = band_of(cfg, event)
+            if event_band < max_seen_band:
+                late_count += 1
+            max_seen_band = max(max_seen_band, event_band)
+
+    dirty_ok = (
+        dirty_resume_same == len(ALL_TOPICS)
+        and null_count > 0
+        and envelope_null_count == 0
+        and dup_count > 0
+        and late_count > 0
+    )
+    check("16 dirty data nulls, duplicates, late delivery aur resume sahi",
+          dirty_ok,
+          f"nulls {null_count}, dups {dup_count}, late {late_count}, "
+          f"resume {dirty_resume_same}/{len(ALL_TOPICS)}")
+
     print(f"\n{sum(results)}/{len(results)} checks pass")
     print(f"Files: {main_run.out}")
     return 0 if all(results) else 1

@@ -1,4 +1,5 @@
 """SQLite store for simulator runtime state (not events or master data)."""
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -88,6 +89,14 @@ CREATE TABLE IF NOT EXISTS offer_daily (
     PRIMARY KEY (customer_id, day)
 );
 CREATE INDEX IF NOT EXISTS idx_offer_daily_day ON offer_daily(day);
+
+CREATE TABLE IF NOT EXISTS delayed_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    deliver_at_band INTEGER NOT NULL,
+    topic           TEXT NOT NULL,
+    payload_json    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_delayed_events_band ON delayed_events(deliver_at_band);
 """
 
 CUSTOMER_COLS = (
@@ -302,6 +311,30 @@ class StateStore:
         self.conn.execute(
             "DELETE FROM offer_daily WHERE day<?", (before_day,)
         )
+
+    def add_delayed_event(self, deliver_at_band, topic, event):
+        self.conn.execute(
+            "INSERT INTO delayed_events(deliver_at_band, topic, payload_json) "
+            "VALUES(?, ?, ?)",
+            (deliver_at_band, topic, json.dumps(event, ensure_ascii=False)),
+        )
+
+    def pop_delayed_events(self, band_index):
+        rows = self.conn.execute(
+            "SELECT id, topic, payload_json FROM delayed_events "
+            "WHERE deliver_at_band<=? ORDER BY id",
+            (band_index,),
+        ).fetchall()
+        if not rows:
+            return []
+        self.conn.executemany(
+            "DELETE FROM delayed_events WHERE id=?",
+            [(row["id"],) for row in rows],
+        )
+        return [
+            (row["topic"], json.loads(row["payload_json"]))
+            for row in rows
+        ]
 
     def close(self):
         self.conn.close()

@@ -15,11 +15,12 @@ Source: Claude Docs "ChurnGuard v2 - Phase 1 Schema and Simulator Design" (v1.1,
 | Package minutes | quota_voice_min | 4 fields: quota_onnet_min, quota_offnet_min, quota_anynet_min, quota_intl_min |
 | Packages | ~40 rows, ids like PKG_D1_1GB | 29 (Jazz CSV se), id P_<TYPE>_<DAYS>D_<4 hex>, types social/voice/data/combo, + region, night_only |
 | Team fields | contact, team_size | built masters mein nahi hain (team_id, region, city, zone, base_lat, base_lon) |
-| Dirty data | ~1-2% | nulls 1.5%, duplicates 0.5%, late 1.5% (max 48 ghante) |
+| Dirty data | ~1-2% | **[tay hua, Step 10]** nulls 1.5% (sirf non-envelope/non-PK fields), exact duplicates 0.5% (same event_id), late events 1.5% (1-8 bands / max 48 ghante baad, asli event_time ke saath) |
 | field_team_status_events | optional, hourly | team movement abhi nahi (fixed base), is liye nahi banega |
 | Profile aur customer ki values | **[tay karna hai]** | **[tay hua]** age_band, gender, language_pref, arpu_band, acquisition_channel, device_type ki taqseem neeche section 3 mein |
 | Customer burst | pehle 7 din, 20,000 | decaying burst, config key `customers.burst_decay` (0.8) |
 | tower_metrics fields | signal_strength_dbm, load_pct, dropped_call_rate, avg_data_speed_mbps, status | **[tay hua, Step 5]** health, signal_dbm, load, active_users, total_minutes, total_data_mb, dropped_calls (section 3). DOWN ghante mein event nahi banta |
+
 ## 1. Common envelope (har event mein)
 
 | Field | Type | Note |
@@ -113,7 +114,7 @@ customer_id, event_date, subscription_id, action (PURCHASE / AUTO_RENEW / EXPIRE
 **[tay hua, Step 7]** Fields: envelope + customer_id, event_date, subscription_id (`SUB-<customer_id>-<band_index>-<package_id>`), action, package_id, price_pkr, validity_days, balance_after. Saari 6 actions bani hain: PURCHASE, AUTO_RENEW, AUTO_RENEW_OFF, EXPIRE, QUOTA_EXHAUSTED, ADDON_PURCHASE (add-on = wahi package dobara, 50% chance).
 
 ### offer_events (key=customer_id, partition event_date=)
-**[tay hua, Step 9]** Fields: envelope + customer_id, event_date, offer_id (`OFR-<customer_id>-<band_index>-<offer_type>`), offer_type (DATA_BOOST / CALL_BUNDLE / RECHARGE_BONUS / WEEKEND_SPECIAL / EVENT_OFFER / CRICKET_PACK), action (SENT / ACCEPTED / EXPIRED / HELD), group (treatment / control), trigger_rule (usage_rise / low_balance / weekend / event), campaign_name (nullable, jaise Eid-ul-Adha), package_id (nullable, packages_master se link), discount_pct (nullable float, jaise 0.25). Control group (`~15%`) ko offer nahi bheja jata aur `HELD` record hota hai; har treatment customer ko 7 din mein zyada se zyada 1 offer aur ek waqt mein ek hi OPEN offer milta hai.
+**[tay hua, Step 9]** Fields: envelope + customer_id, event_date, offer_id (`OFR-<customer_id>-<band_index>-<offer_type>`), offer_type (RECHARGE_BONUS / DATA_BOOST / CALL_BUNDLE / WEEKEND_SPECIAL / EVENT_OFFER / CRICKET_PACK), action (SENT / ACCEPTED / EXPIRED / HELD), group (treatment / control), trigger_rule (balance / usage_mix / weekend / event), campaign_name (nullable, jaise Eid_ul_Adha), package_id (nullable, packages_master se link), discount_pct (nullable float, jaise 0.25). Control group (~10%) ko offer nahi bheja jata aur `HELD` record hota hai (package_id null). Har customer ko 7 din mein zyada se zyada 1 offer (30 din mein 3, HELD bhi ginte hain) aur ek waqt mein ek hi OPEN offer milta hai. Offer ACCEPTED hone par package_events mein `PURCHASE` bhi jata hai.
 
 ### lifecycle_events (key=customer_id, partition event_date=)
 **[tay hua, Step 8]** Fields: envelope + customer_id, event_date, from_status, to_status, churn_reason, inactivity_days. Tabdiliyan: ACTIVE se SUSPENDED (sirf prepaid, 14 din inactive, inactivity_days bhara), ACTIVE se CHURNED (risk se, churn_reason bhara, inactivity_days null), SUSPENDED se CHURNED (30 din inactive, churn_reason INACTIVITY, inactivity_days bhara), SUSPENDED se REACTIVATED (sirf ek event, customer seedha ACTIVE ho jata hai). Postpaid kabhi SUSPENDED nahi hota. churn_reason ki values: HIGH_PRICE, POOR_NETWORK, USAGE_DECLINE, INACTIVITY, COMPETITOR_OFFER (model feature kabhi nahi). Faisla roz ek baar Evening band ke aakhir mein, event_time us band ki shuruat hai. At-risk, zero_balance_since aur customer_daily chhupi state hain, publish nahi hoti.

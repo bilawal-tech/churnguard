@@ -1,0 +1,1 @@
+"""Dirty data injection (nulls, duplicates, late events) for Bronze/Silver testing."""
