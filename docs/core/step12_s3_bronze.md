@@ -32,26 +32,34 @@ Event ki `dt` tareekh `event_ts`, `timestamp`, `ts`, ya `created_at` ke ISO date
 ## At-least-once delivery
 Kafka offsets ka `consumer.commit()` tabhi chalta hai jab us batch ke **tamam** S3 `put_object` calls kamyab ho jayein. Koi upload exception de to exception dobara raise hoti hai aur offsets commit nahi hote. Is se failed upload ke baad messages dobara mil sakte hain, yani delivery at-least-once hai.
 
+## Full 180-Day Backfill Run (2,573,571 Events)
+Single-node WSL2 KRaft Kafka broker par consumer group coordinator rebalance hang hone (`Assigned partitions: 0`) se bachne ke liye full historical backfill mein direct partition assignment (`consumer.assign(tps)` + `seek_to_beginning`) istemal kiya gaya. Is se tamam **54 partitions** (9 topics × 6 partitions) 50,000-record batches mein drain hokar `s3://churnguard-data-bilawal/raw/events/` par land hue (`2,573,571` records, `0` DLQ).
+
 ## Commands
 Master snapshots upload karne ke liye:
 
 ```powershell
 python -m ingestion.masters_uploader --config config/config.yaml --raw-dir data/raw
-```
-
 Do batches tak consumer chalane aur idle par nikalne ke liye:
 
-```powershell
+PowerShell
 python -m ingestion.consumer --config config/config.yaml --max-batches 2 --batch-records 5000 --batch-seconds 60 --idle-timeout-ms 1000
-```
+Full 180-day backfill (2,573,571 records) direct partition assignment ke saath chalane ke liye:
 
-`boto3` se `raw/` ke uploaded objects dekhne ke liye:
+PowerShell
+python -c "from kafka import KafkaConsumer, TopicPartition; from ingestion.settings import load_settings; from ingestion.topics import EVENT_TOPICS; from ingestion.consumer import S3BronzeConsumer; s = load_settings('config/config.yaml'); raw = KafkaConsumer(bootstrap_servers=s.bootstrap_servers, enable_auto_commit=False, auto_offset_reset='earliest'); raw.topics(); tps = [TopicPartition(t, p) for t in EVENT_TOPICS for p in (raw.partitions_for_topic(t) or [])]; raw.assign(tps); raw.seek_to_beginning(*tps); c = S3BronzeConsumer(s, consumer=raw); c.consumer.commit = lambda *a, **k: None; total = 0; 
+while True:
+    r = c.run(batch_records=50000, batch_seconds=15, idle_timeout_ms=5000)
+    total += r['records']
+    if r['records'] == 0: break
+raw.close()"
+boto3 se raw/ ke uploaded objects dekhne ke liye:
 
-```powershell
+PowerShell
 python -c "import boto3; c=boto3.client('s3', region_name='ap-south-1'); p=c.get_paginator('list_objects_v2'); print('\n'.join(o['Key'] for page in p.paginate(Bucket='churnguard-data-bilawal', Prefix='raw/') for o in page.get('Contents', [])))"
-```
+Tests
+tests/test_ingest_s3_bronze.py: master gzip upload aur CLI, topic/date grouping, corrupt payload DLQ, upload ke baad commit, aur upload failure par commit na hona.
 
-## Tests
-- `tests/test_ingest_s3_bronze.py`: master gzip upload aur CLI, topic/date grouping, corrupt payload DLQ, upload ke baad commit, aur upload failure par commit na hona.
-- Bronze tests: **5 pass**.
-- `python -m pytest tests -q`: **288 total tests pass**.
+Bronze tests: 5 pass.
+
+python -m pytest tests -q: 288 total tests pass.

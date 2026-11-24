@@ -10,7 +10,7 @@ Is step mein `data/raw` ke event JSONL files Kafka topics mein replay hote hain.
 | `ingestion/topics.py` | 9 event topics, Kafka keys aur raw partition values |
 | `ingestion/kafka_admin.py` | Sirf missing Kafka topics banata hai |
 | `ingestion/replay.py` | JSONL files ko checkpoint ke saath Kafka mein replay karta hai |
-| `ingestion/producer.py` | Kafka send, retries aur producer-side DLQ |
+| `ingestion/producer.py` | Async Kafka send, batching, retries aur producer-side DLQ |
 | `tests/test_ingest_topics.py` | Topic keys, partitions aur settings |
 | `tests/test_ingest_replay.py` | Replay, resume, flush aur DLQ |
 
@@ -32,31 +32,38 @@ Is step mein `data/raw` ke event JSONL files Kafka topics mein replay hote hain.
 ## Topic provisioning
 `ingestion/kafka_admin.py` broker ke existing topic names dekhta hai. Existing topics ko bilkul nahi badalta; sirf missing topic ko 6 partitions, replication 1 aur 30 din retention ke saath banata hai. Is liye pehle se bane 9 topics par provisioning dobara chalana safe hai.
 
-## Resumable replay
-`ingestion/replay.py` `data/raw/<topic>.jsonl` ko chunks mein parhta hai. Har chunk ke baad pehle producer `flush()` hota hai; us ke kamyab hone par line offset `.tmp` file mein likh kar `os.replace` se checkpoint atomically update hota hai. `--checkpoint state/producer_ckpt.json` se yeh checkpoint path diya ja sakta hai. Config ka default path `state/ingest_producer_checkpoint.json` hai.
+## Resumable replay & Async Batching
+`ingestion/replay.py` `data/raw/<topic>.jsonl` ko chunks mein parhta hai. Per-message synchronous `.get()` blocking ko replace karke asynchronous batching (`linger_ms=50`, `batch_size=262144` / 256KB) aur non-blocking `add_errback` callbacks lagaye gaye hain, jabke unit tests ke fake producers ke liye sync fallback barkarar hai.
+
+Har chunk ke baad pehle producer `flush()` hota hai; us ke kamyab hone par line offset `.tmp` file mein likh kar `os.replace` se checkpoint atomically update hota hai. `--checkpoint state/producer_ckpt.json` se yeh checkpoint path diya ja sakta hai. Config ka default path `state/ingest_producer_checkpoint.json` hai.
 
 Corrupt JSON ya JSON object na hone wali line, aur send retries ke baad nakaam event, `data/dlq/producer_<topic>.jsonl` mein jata hai. `--limit` har topic par is invocation mein zyada se zyada process hone wali nayi lines ki tadaad hai; chhota smoke test ek topic tak mahdood rakha ja sakta hai.
 
-## Commands
+## WSL2 Kafka Broker Runbook
+Laptop reboot ke baad WSL2 Ubuntu mein KRaft broker start aur verify karne ke commands:
+
+```powershell
+# Kafka KRaft broker start (WSL2)
+wsl -d Ubuntu-22.04 -e bash -lc '/home/bilawal/kafka_2.13-3.9.2/bin/kafka-server-start.sh -daemon /home/bilawal/kafka_2.13-3.9.2/config/kraft/server.properties'
+
+# Broker status check
+wsl -d Ubuntu-22.04 -e bash -lc 'pgrep -f kafka.Kafka && echo "RUNNING" || echo "STOPPED"'
+Commands
 Missing topics banane ke liye:
 
-```powershell
+PowerShell
 python -m ingestion.kafka_admin --config config/config.yaml
-```
-
 Ek topic ki pehli 10 lines ka bounded smoke test:
 
-```powershell
+PowerShell
 python -m ingestion.replay --config config/config_test.yaml --raw-dir data/raw --checkpoint state/producer_ckpt.json --topics customer_events --limit 10
-```
+Tamam topics ka full 180-day replay (2,573,571 events, ~1–2 min, DLQ: 0):
 
-Tamam topics ka full replay:
-
-```powershell
+PowerShell
 python -m ingestion.replay --config config/config.yaml --raw-dir data/raw --checkpoint state/producer_ckpt.json
-```
+Tests
+tests/test_ingest_topics.py: settings, 9 topics ki keys aur partition dates.
 
-## Tests
-- `tests/test_ingest_topics.py`: settings, 9 topics ki keys aur partition dates.
-- `tests/test_ingest_replay.py`: multi-topic send, checkpoint resume, flush failure aur DLQ.
-- `python -m pytest tests -q`: ingestion ke tamam tests aur baqi project tests.
+tests/test_ingest_replay.py: multi-topic send, checkpoint resume, flush failure aur DLQ.
+
+python -m pytest tests -q: ingestion ke tamam tests aur baqi project tests.

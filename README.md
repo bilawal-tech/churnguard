@@ -16,13 +16,14 @@ ChurnGuard is a configurable telecom customer-churn and tower-health early-warni
 | 8 | Lifecycle (churn) | Done |
 | 9 | Offers and promotions (treatment/control holdout, daily triggers, `offer_events`) | Done |
 | 10 | Dirty data (nulls, duplicates, late events) | Done |
-| 11 | Kafka ingestion (9 topics, deterministic partition keys, resumable replay, DLQ) | Done |
+| 11 | Kafka ingestion (9 topics, deterministic partition keys, async batch replay, DLQ) | Done |
 | 12 | S3 Bronze storage (masters snapshot uploader, micro-batched gzip consumer) | Done |
-| 13 | Full 180-day run, Bronze checks and Silver ETL | Planned |
+| 13 | Full 180-day simulation & S3 Bronze backfill (2,573,571 events, 0 DLQ) | Done |
+| 14 | Bronze checks and Silver ETL (PySpark cleansing & deduplication) | Planned |
 
 After Bronze ingestion: Silver (cleansing), Gold (features), PostgreSQL, the four solutions (churn prediction, tower failure alerts, offers, complaints model), dashboard, and Docker.
 
-Step 4 produces `customer_events`, `profile_events` and `usage_events`. Step 5 adds `tower_metrics_events` (hourly) and `network_events` (outage START and END), and tower health now changes `dropped_calls` and moves customers off a DOWN tower. Step 7 adds `recharge_events` and `package_events` and fills `active_package_ids`, `spend_from_package` and `spend_from_balance` in `usage_events`. Step 8 adds daily lifecycle decisions and `lifecycle_events`. Step 9 adds daily offer evaluation, treatment/control holdout, and `offer_events` (plus discounted or free `package_events` on acceptance). Step 10 adds post-hook dirty data injection (nulls, exact duplicates, and SQLite-persisted late events). Step 11 provisions the 9 Kafka topics and replays local JSONL streams into Kafka with atomic checkpointing and DLQ routing. Step 12 uploads master snapshots and consumes the 9 Kafka topics into date-partitioned `.jsonl.gz` objects in AWS S3 Bronze (`raw/`).
+Step 4 produces `customer_events`, `profile_events` and `usage_events`. Step 5 adds `tower_metrics_events` (hourly) and `network_events` (outage START and END), and tower health now changes `dropped_calls` and moves customers off a DOWN tower. Step 7 adds `recharge_events` and `package_events` and fills `active_package_ids`, `spend_from_package` and `spend_from_balance` in `usage_events`. Step 8 adds daily lifecycle decisions and `lifecycle_events`. Step 9 adds daily offer evaluation, treatment/control holdout, and `offer_events` (plus discounted or free `package_events` on acceptance). Step 10 adds post-hook dirty data injection (nulls, exact duplicates, and SQLite-persisted late events). Step 11 provisions the 9 Kafka topics (54 partitions) and replays local JSONL streams into Kafka with asynchronous batching, atomic checkpointing, and DLQ routing. Step 12 uploads master snapshots and consumes the 9 Kafka topics into date-partitioned `.jsonl.gz` objects in AWS S3 Bronze (`raw/`). Step 13 completes the full 180-day historical backfill of **2,573,571 events** into S3 Bronze with zero DLQ records.
 
 ## Architecture
 
@@ -43,11 +44,13 @@ flowchart LR
     classDef todo fill:#eeeeee,stroke:#888888,color:#000
     class SIM,JSONL,KAFKA,BRONZE done
     class SILVER,GOLD,PG,MODELS,DASH todo
-Green is built, yellow is in progress, grey is planned. Local JSONL generation, Kafka topic replay, and AWS S3 Bronze ingestion are complete. Master data (tower_master, packages_master, field_teams_master) uploads directly to S3 Bronze (raw/masters/), bypassing Kafka.
+```
 
-How the pieces connect
+Green is built, yellow is in progress, grey is planned. Local JSONL generation, Kafka topic replay, and AWS S3 Bronze ingestion (2,573,571 events across 180 simulated days) are complete. Master data (`tower_master`, `packages_master`, `field_teams_master`) uploads directly to S3 Bronze (`raw/masters/`), bypassing Kafka.
 
-Code snippet
+### How the pieces connect
+
+```mermaid
 flowchart TD
     CFG["config/config.yaml<br/>config/config_test.yaml"]
     CSV["config/reference/operator_packages.csv"]
@@ -114,7 +117,7 @@ flowchart TD
     subgraph ING["ingestion"]
         ISET["settings.py & topics.py<br/>9 topics, partition keys"]
         IADM["kafka_admin.py<br/>topic provisioning"]
-        IREP["replay.py & producer.py<br/>resumable replay, DLQ"]
+        IREP["replay.py & producer.py<br/>async resumable replay, DLQ"]
         IMAS["masters_uploader.py<br/>gzip master snapshots"]
         ICON["consumer.py<br/>micro-batched S3 writer"]
     end
@@ -122,7 +125,7 @@ flowchart TD
     DB[("state/sim_state.db")]
     HOOKS["hooks, in order<br/>customers → package → recharge → usage → tower → offer → lifecycle<br/>post_hooks: dirty data"]
     EVENTS[("JSONL event files")]
-    KAFKA[("Kafka 3.9 KRaft<br/>9 event topics")]
+    KAFKA[("Kafka 3.9 KRaft<br/>9 event topics / 54 partitions")]
     S3B[("AWS S3 Bronze<br/>raw/masters & raw/events")]
     VERIFY["simulator/verify_core_pipeline.py"]
 
@@ -184,150 +187,125 @@ flowchart TD
     EVENTS --> IREP --> KAFKA
     RAWM --> IMAS --> S3B
     KAFKA --> ICON --> S3B
-common.py is shared by everything: config loading, ID formats, and a seeded random generator per entity (make_rng), so the same entity always gets the same values.
+```
 
-The master builders read the config (and the Jazz package CSV) and run_masters.py writes them to data/raw/.
+`common.py` is shared by everything: config loading, ID formats, and a seeded random generator per entity (`make_rng`), so the same entity always gets the same values.
 
-The customer generator uses the tower list to give each customer a home tower in their own city. events.py turns a new customer into customer_events and profile_events records. The customer hook decides how many customers sign up in each band.
+The master builders read the config (and the Jazz package CSV) and `run_masters.py` writes them to `data/raw/`.
+
+The customer generator uses the tower list to give each customer a home tower in their own city. `events.py` turns a new customer into `customer_events` and `profile_events` records. The customer hook decides how many customers sign up in each band.
 
 The billing engine holds the rules for choosing a package, recharging, taking usage from package quotas and charging the rest from balance. The package hook buys, renews and expires packages, and the recharge hook tops up prepaid customers with a low balance.
 
-The usage generator builds one usage record per customer per band. The usage hook runs it for every ACTIVE customer, passes the previous band's tower health, and then applies the billing rules to fill the package and spend fields. Towers passed to it must come from add_neighbors(build_towers(cfg)), so roaming to a neighbor tower works.
+The usage generator builds one usage record per customer per band. The usage hook runs it for every ACTIVE customer, passes the previous band's tower health, and then applies the billing rules to fill the package and spend fields. Towers passed to it must come from `add_neighbors(build_towers(cfg))`, so roaming to a neighbor tower works.
 
-The tower model decides signal, health and failures. The tower hook runs after the usage hook, uses this band's usage events to get each tower's traffic, and writes tower_metrics_events and network_events.
+The tower model decides signal, health and failures. The tower hook runs after the usage hook, uses this band's usage events to get each tower's traffic, and writes `tower_metrics_events` and `network_events`.
 
 The offer hook runs after the tower hook and before the lifecycle hook. It records per-band usage and recharge activity, resolves open offers at the end of Evening, and evaluates new offers with a deterministic ~10% control holdout and a 7-day / 30-day frequency cap.
 
-The lifecycle hook runs last among the main hooks. It records each band's usage in customer_daily, makes the daily churn/inactivity decision at the end of Evening, updates hidden customer state, and emits lifecycle_events. Its status changes take effect from the next day's Night band.
+The lifecycle hook runs last among the main hooks. It records each band's usage in `customer_daily`, makes the daily churn/inactivity decision at the end of Evening, updates hidden customer state, and emits `lifecycle_events`. Its status changes take effect from the next day's Night band.
 
-The dirty-data post-hook (simulator/dirty/processor.py) runs after all main hooks and before JSONL output. It injects controlled nulls, exact duplicate events, and late events (persisted in SQLite delayed_events so stop-and-resume stays deterministic).
+The dirty-data post-hook (`simulator/dirty/processor.py`) runs after all main hooks and before JSONL output. It injects controlled nulls, exact duplicate events, and late events (persisted in SQLite `delayed_events` so stop-and-resume stays deterministic).
 
-The engine combines the clock, the SQLite state store and the checkpoint, and calls hooks and post-hooks. Each hook returns (topic, event) pairs. BandContext.band_events lets a hook see the events of the hooks before it.
+The engine combines the clock, the SQLite state store and the checkpoint, and calls hooks and post-hooks. Each hook returns `(topic, event)` pairs. `BandContext.band_events` lets a hook see the events of the hooks before it.
 
-The ingestion layer (ingestion/) bridges local files to AWS S3 Bronze: kafka_admin.py provisions the 9 topics on the local Kafka 3.9 KRaft broker, replay.py and producer.py stream JSONL lines with atomic byte-offset checkpoints and DLQ routing, masters_uploader.py uploads compressed master snapshots directly to raw/masters/, and consumer.py micro-batches Kafka records into date-partitioned .jsonl.gz objects in raw/events/ before committing offsets.
+The ingestion layer (`ingestion/`) bridges local files to AWS S3 Bronze: `kafka_admin.py` provisions the 9 topics on the local Kafka 3.9 KRaft broker, `replay.py` and `producer.py` stream JSONL lines with asynchronous batching, atomic byte-offset checkpoints, and DLQ routing, `masters_uploader.py` uploads compressed master snapshots directly to `raw/masters/`, and `consumer.py` micro-batches Kafka records into date-partitioned `.jsonl.gz` objects in `raw/events/` before committing offsets.
 
-What happens in one time band
+## What happens in one time band
 
-Open a SQLite transaction.
+1. Open a SQLite transaction.
+2. Run each hook in order; each returns the events it produced.
+   - **Customer hook:** signs up this band's new customers (SQLite row plus `customer_events` and `profile_events`).
+   - **Package hook:** expires, renews or buys packages for ACTIVE customers (`package_events`).
+   - **Recharge hook:** tops up prepaid customers whose balance is below 50 PKR (`recharge_events`).
+   - **Usage hook:** one `usage_events` record per ACTIVE customer, including customers who signed up in this same band. It reads the tower health saved at the end of the previous band, takes the usage from active package quotas first and charges the rest from balance (this can also write `package_events` for an exhausted package).
+   - **Tower hook:** counts this band's traffic per tower from the usage events, runs six hourly steps per tower, writes `tower_metrics_events` and `network_events`, and saves the tower state.
+   - **Offer hook:** records this band's usage and recharge activity, and at the end of Evening resolves open offers then evaluates new offers. Treatment customers can receive SENT, ACCEPTED or EXPIRED records; control customers get HELD with no sent offer. The rules enforce 7-day / 30-day frequency caps and one OPEN offer per customer.
+   - **Lifecycle hook (last):** adds this band's usage to `customer_daily`; at the end of Evening it makes one daily lifecycle decision per customer and writes any `lifecycle_events`. A new status applies from the next day's Night band.
+3. Run `post_hooks` (dirty data): release any `delayed_events` due at this band, inject deterministic nulls on non-envelope/non-primary-key fields, hold late events in SQLite `delayed_events` for future bands, and emit exact duplicate events.
+4. Append the events to JSONL files, one file per topic.
+5. Save the checkpoint (band index, next customer number) and commit the transaction.
+6. Advance the clock. In live mode, wait between bands.
 
-Run each hook in order; each returns the events it produced.
+If a band crashes, the transaction rolls back and the band runs again. Events are deterministic (`event_id` comes from the seed), so any duplicates are removed by `event_id` downstream.
 
-Customer hook: signs up this band's new customers (SQLite row plus customer_events and profile_events).
+## Customer and usage model (Step 4)
 
-Package hook: expires, renews or buys packages for ACTIVE customers (package_events).
+**Customers.** The first `initial_burst_days` days bring initial customers, with a decaying shape (each day is `burst_decay` times the previous day, normalized). After that `new_per_day` customers sign up daily. A day's customers are split equally across its four bands. Customer numbers start at 1 (`C0000001`).
 
-Recharge hook: tops up prepaid customers whose balance is below 50 PKR (recharge_events).
+Profile fields are drawn from fixed shares set in `simulator/customers/events.py`:
 
-Usage hook: one usage_events record per ACTIVE customer, including customers who signed up in this same band. It reads the tower health saved at the end of the previous band, takes the usage from active package quotas first and charges the rest from balance (this can also write package_events for an exhausted package).
+| Field | Values (share) |
+|---|---|
+| `age_band` | 18-24 (25%), 25-34 (35%), 35-44 (22%), 45-54 (12%), 55+ (6%) |
+| `gender` | male (60%), female (40%) |
+| `language_pref` | Urdu (65%), English (25%), Regional (10%) |
+| `arpu_band` | low, mid, high; prepaid leans low and mid (overall about 40/40/20) |
+| `acquisition_channel` | retailer (55%), online (15%), campaign (15%), referral (10%), other (5%) |
+| `device_type` | smartphone_android (62%), smartphone_ios (8%), feature_phone (30%) |
 
-Tower hook: counts this band's traffic per tower from the usage events, runs six hourly steps per tower, writes tower_metrics_events and network_events, and saves the tower state.
+Phone and CNIC are masked from the start (`0334-xxxx09`, `xxxxx-xxxxx45-7`). The last CNIC digit follows gender (odd for male, even for female).
 
-Offer hook: records this band's usage and recharge activity, and at the end of Evening resolves open offers then evaluates new offers. Treatment customers can receive SENT, ACCEPTED or EXPIRED records; control customers get HELD with no sent offer. The rules enforce 7-day / 30-day frequency caps and one OPEN offer per customer.
+**Usage.** One record per ACTIVE customer per band:
 
-Lifecycle hook (last): adds this band's usage to customer_daily; at the end of Evening it makes one daily lifecycle decision per customer and writes any lifecycle_events. A new status applies from the next day's Night band.
+- Each customer gets a persona from their device: feature phones are `call_heavy` or `sms_heavy` with almost no data; smartphones are `call_heavy`, `whatsapp_only` or `data_heavy`. The persona sets the daily average of on-net, off-net and international minutes, SMS and data (split into WhatsApp, social, video, browsing and other). After the Step 7 calibration the daily averages are lower (for example `call_heavy` about 6 on-net minutes and 30 MB a day).
+- A fixed per-customer factor (0.5x to 1.8x) and a per-band noise (about plus or minus 25%) make customers differ. A day's use is split across the bands as Night 10%, Morning 30%, Afternoon 25%, Evening 35%.
+- In 85% of bands the customer is on the home tower, otherwise on one of its three neighbor towers (same city). If the chosen tower is DOWN, the customer uses the home tower or a neighbor that is not DOWN; in a city with one tower the customer stays on the DOWN tower.
+- `dropped_calls`: calls are estimated as minutes divided by 3, and each call drops with a base chance of 1.5% on a healthy tower. This chance is multiplied by 3 (DEGRADED), 8 (CRITICAL) or 20 (DOWN).
+- Usage is taken from the active package first, then charged from balance at out-of-bundle rates; the three package and spend fields are filled (Step 7).
 
-Run post_hooks (dirty data): release any delayed_events due at this band, inject deterministic nulls on non-envelope/non-primary-key fields, hold late events in SQLite delayed_events for future bands, and emit exact duplicate events.
-
-Append the events to JSONL files, one file per topic.
-
-Save the checkpoint (band index, next customer number) and commit the transaction.
-
-Advance the clock. In live mode, wait between bands.
-
-If a band crashes, the transaction rolls back and the band runs again. Events are deterministic (event_id comes from the seed), so any duplicates are removed by event_id downstream.
-
-Customer and usage model (Step 4)
-
-Customers. The first initial_burst_days days bring initial customers, with a decaying shape (each day is burst_decay times the previous day, normalized). After that new_per_day customers sign up daily. A day's customers are split equally across its four bands. Customer numbers start at 1 (C0000001).
-
-Profile fields are drawn from fixed shares set in simulator/customers/events.py:
-
-Field	Values (share)
-age_band	18-24 (25%), 25-34 (35%), 35-44 (22%), 45-54 (12%), 55+ (6%)
-gender	male (60%), female (40%)
-language_pref	Urdu (65%), English (25%), Regional (10%)
-arpu_band	low, mid, high; prepaid leans low and mid (overall about 40/40/20)
-acquisition_channel	retailer (55%), online (15%), campaign (15%), referral (10%), other (5%)
-device_type	smartphone_android (62%), smartphone_ios (8%), feature_phone (30%)
-Phone and CNIC are masked from the start (0334-xxxx09, xxxxx-xxxxx45-7). The last CNIC digit follows gender (odd for male, even for female).
-
-Usage. One record per ACTIVE customer per band:
-
-Each customer gets a persona from their device: feature phones are call_heavy or sms_heavy with almost no data; smartphones are call_heavy, whatsapp_only or data_heavy. The persona sets the daily average of on-net, off-net and international minutes, SMS and data (split into WhatsApp, social, video, browsing and other). After the Step 7 calibration the daily averages are lower (for example call_heavy about 6 on-net minutes and 30 MB a day).
-
-A fixed per-customer factor (0.5x to 1.8x) and a per-band noise (about plus or minus 25%) make customers differ. A day's use is split across the bands as Night 10%, Morning 30%, Afternoon 25%, Evening 35%.
-
-In 85% of bands the customer is on the home tower, otherwise on one of its three neighbor towers (same city). If the chosen tower is DOWN, the customer uses the home tower or a neighbor that is not DOWN; in a city with one tower the customer stays on the DOWN tower.
-
-dropped_calls: calls are estimated as minutes divided by 3, and each call drops with a base chance of 1.5% on a healthy tower. This chance is multiplied by 3 (DEGRADED), 8 (CRITICAL) or 20 (DOWN).
-
-Usage is taken from the active package first, then charged from balance at out-of-bundle rates; the three package and spend fields are filled (Step 7).
-
-Tower health model (Step 5)
+## Tower health model (Step 5)
 
 Each tower has a signal (dBm) and a health state: HEALTHY (above -95 dBm), DEGRADED (-95 to -105), CRITICAL (below -105) or DOWN. A healthy tower can:
 
-fail suddenly (0.01% per hour), with no warning;
+- fail suddenly (0.01% per hour), with no warning;
+- fail slowly: the signal falls in a straight line over 1 to 7 days, then the tower goes DOWN;
+- have a short dip of 2 to 8 hours that recovers by itself (a false alarm, 5 times more likely when load is above 1.0).
 
-fail slowly: the signal falls in a straight line over 1 to 7 days, then the tower goes DOWN;
+DOWN lasts 3 to 12 hours. Load is the band's real traffic (`active_users` from usage events divided by the tower's `capacity_users`), split over six hours with fixed weights. The hidden state (`precursor_active`, `failure_at`) stays in SQLite and is never published. Full details and numbers: `docs/core/step5_tower_health.md`.
 
-have a short dip of 2 to 8 hours that recovers by itself (a false alarm, 5 times more likely when load is above 1.0).
+## Billing model (Step 7)
 
-DOWN lasts 3 to 12 hours. Load is the band's real traffic (active_users from usage events divided by the tower's capacity_users), split over six hours with fixed weights. The hidden state (precursor_active, failure_at) stays in SQLite and is never published. Full details and numbers: docs/core/step5_tower_health.md.
+- **Recharge:** a prepaid customer with a balance below 50 PKR recharges 100, 200, 300, 500 or 1000 PKR (by `arpu_band`) through retailer, easypaisa, jazzcash, app or card.
+- **Packages:** a customer with no active package buys one with a small chance per band (about 15% of customers never do). The type follows the persona, the price tier follows `arpu_band`, prepaid customers buy only what they can afford, and package regions are mapped to our eight cities. Packages can auto-renew, expire, run out of quota (and be bought again as an add-on). `package_events` has six actions.
+- **Spend:** quota is used first, then balance at out-of-bundle rates (on-net 1.5, off-net 2.5, international 15 PKR per minute, SMS 0.5 PKR, data 0.1 PKR per MB). `spend_from_package` is the value of the covered usage at those rates, not the PKR paid. A prepaid balance never goes below 0 (usage and `dropped_calls` are scaled down instead). Postpaid customers keep a balance of 0 and their bill is in `spend_from_balance`.
+- **Calibration:** in an 11-day run with about 20,000 customers, prepaid spend was about 796 PKR per month and 53% of customers held a package. Full details and numbers: `docs/core/step7_billing.md`.
 
-Billing model (Step 7)
+## Lifecycle and churn model (Step 8)
 
-Recharge: a prepaid customer with a balance below 50 PKR recharges 100, 200, 300, 500 or 1000 PKR (by arpu_band) through retailer, easypaisa, jazzcash, app or card.
+- **Daily decision:** once a day, at the end of the Evening band, every ACTIVE customer gets a churn chance: a small base chance times `(1 + risk score)` times noise (prepaid; postpaid is half). The risk score adds up four parts: price (by `arpu_band`), usage drop (last 7 days against the 28-day weekly average), network quality (dropped calls over calls in the last 7 days) and zero balance (prepaid only).
+- **At-risk:** a hidden state (never published, never a model feature). A customer whose risk score crosses 1.0 uses 60% less and recharges rarely, and has twice the churn chance, until the score stays low for 14 days.
+- **Prepaid inactivity:** 14 days with no usage means SUSPENDED, 30 days means CHURNED. Postpaid has no balance, so it goes straight from ACTIVE to CHURNED. SUSPENDED customers can come back (REACTIVATED) with a recharge, 3% per day; CHURNED is final.
+- **Reasons:** `churn_reason` (HIGH_PRICE, POOR_NETWORK, USAGE_DECLINE, INACTIVITY, COMPETITOR_OFFER) is ground truth only. SUSPENDED and CHURNED customers produce no usage events. Full details: `docs/core/step8_lifecycle.md`.
 
-Packages: a customer with no active package buys one with a small chance per band (about 15% of customers never do). The type follows the persona, the price tier follows arpu_band, prepaid customers buy only what they can afford, and package regions are mapped to our eight cities. Packages can auto-renew, expire, run out of quota (and be bought again as an add-on). package_events has six actions.
+## Offers and promotions model (Step 9)
 
-Spend: quota is used first, then balance at out-of-bundle rates (on-net 1.5, off-net 2.5, international 15 PKR per minute, SMS 0.5 PKR, data 0.1 PKR per MB). spend_from_package is the value of the covered usage at those rates, not the PKR paid. A prepaid balance never goes below 0 (usage and dropped_calls are scaled down instead). Postpaid customers keep a balance of 0 and their bill is in spend_from_balance.
+- **Six offer types:** `DATA_BOOST`, `CALL_BUNDLE`, `RECHARGE_BONUS`, `WEEKEND_SPECIAL`, `EVENT_OFFER` and `CRICKET_PACK`; the daily triggers use low balance (`balance`), usage rise (`usage_mix`), weekends (`weekend`) or 2026 calendar events (`event`: `PSL11_Final`, `Eid_ul_Adha`, `Independence_Day`, `England_Test1`).
+- **Treatment/control holdout:** a deterministic ~10% of customers is held out as control (`HELD`, no offer sent); treatment customers receive `SENT`, then `ACCEPTED` or `EXPIRED`. The rules allow at most 1 offer per 7 days (max 3 in 30 days, including `HELD`) and at most 1 OPEN offer per customer at a time.
+- **Acceptance:** accepting a discounted package offer deducts the discounted price for prepaid customers and emits a non-auto-renewing `package_events` PURCHASE; reaching a `RECHARGE_BONUS` target grants a free reward package. Full details: `docs/core/step9_offers.md`.
 
-Calibration: in an 11-day run with about 20,000 customers, prepaid spend was about 796 PKR per month and 53% of customers held a package. Full details and numbers: docs/core/step7_billing.md.
+## Dirty data model (Step 10)
 
-Lifecycle and churn model (Step 8)
+- **Post-hook injection:** runs after all simulation hooks and before JSONL write (`simulator/dirty/processor.py`), so inter-hook logic stays clean while Bronze/Silver ingestion gets realistic anomalies.
+- **Three anomaly types:** ~1.5% null injection on non-envelope/non-primary-key fields, ~0.5% exact duplicate events (same `event_id`), and ~1.5% late events held in SQLite (`delayed_events`) for 1 to 8 bands (up to 48 hours) and emitted with their original `event_time`. Full details: `docs/core/step10_dirty_data.md`.
 
-Daily decision: once a day, at the end of the Evening band, every ACTIVE customer gets a churn chance: a small base chance times (1 + risk score) times noise (prepaid; postpaid is half). The risk score adds up four parts: price (by arpu_band), usage drop (last 7 days against the 28-day weekly average), network quality (dropped calls over calls in the last 7 days) and zero balance (prepaid only).
+## Kafka ingestion model (Step 11)
 
-At-risk: a hidden state (never published, never a model feature). A customer whose risk score crosses 1.0 uses 60% less and recharges rarely, and has twice the churn chance, until the score stays low for 14 days.
+- **Nine topics:** `customer_events`, `profile_events`, `usage_events`, `recharge_events`, `package_events`, `offer_events`, and `lifecycle_events` are partitioned by `customer_id`; `tower_metrics_events` is partitioned by `tower_id`; `network_events` is partitioned by `region` (6 partitions each = 54 partitions total, 30-day retention on a local WSL2 Kafka 3.9 KRaft broker).
+- **Resumable async replay & DLQ:** `ingestion/replay.py` reads local `.jsonl` files, uses asynchronous batching (`batch_size=256KB`, `linger_ms=50`) with non-blocking error callbacks (~25k+ msg/sec), tracks line offsets atomically in `state/producer_ckpt.json` so restarts never duplicate already-sent lines, supports `--limit` for bounded smoke tests, and routes malformed JSON lines to a Dead Letter Queue instead of crashing. Full details: `docs/core/step11_kafka_ingestion.md`.
 
-Prepaid inactivity: 14 days with no usage means SUSPENDED, 30 days means CHURNED. Postpaid has no balance, so it goes straight from ACTIVE to CHURNED. SUSPENDED customers can come back (REACTIVATED) with a recharge, 3% per day; CHURNED is final.
+## S3 Bronze storage model (Step 12 & Step 13 Backfill)
 
-Reasons: churn_reason (HIGH_PRICE, POOR_NETWORK, USAGE_DECLINE, INACTIVITY, COMPETITOR_OFFER) is ground truth only. SUSPENDED and CHURNED customers produce no usage events. All numbers are starting values and will be tuned for a churn rate of about 26.5% in Step 13. Full details: docs/core/step8_lifecycle.md.
+- **Masters vs. events:** `ingestion/masters_uploader.py` compresses `tower_master`, `packages_master`, and `field_teams_master` into `s3://churnguard-data-bilawal/raw/masters/<master>/snapshot_date=YYYY-MM-DD/<master>.jsonl.gz`.
+- **At-least-once S3 consumer:** `ingestion/consumer.py` consumes all 9 Kafka topics (54 partitions), groups records into micro-batches (`batch_records=50000`, `batch_seconds=15` for full backfill; `batch_records=5000`, `batch_seconds=60` default), writes gzip-compressed NDJSON files partitioned by topic and UTC event date (`raw/events/<topic>/dt=YYYY-MM-DD/batch_<utc>_<uuid8>.jsonl.gz`, plus `raw/dlq/dt=YYYY-MM-DD/` for unparseable payloads), and calls `consumer.commit()` only after every S3 `put_object` call succeeds. Full 180-day backfill completed with **2,573,571 events** and **0 DLQ** records. Full details: `docs/core/step12_s3_bronze.md`.
 
-Offers and promotions model (Step 9)
+## Project structure
 
-Six offer types: DATA_BOOST, CALL_BUNDLE, RECHARGE_BONUS, WEEKEND_SPECIAL, EVENT_OFFER and CRICKET_PACK; the daily triggers use low balance (balance), usage rise (usage_mix), weekends (weekend) or 2026 calendar events (event: PSL11_Final, Eid_ul_Adha, Independence_Day, England_Test1).
-
-Treatment/control holdout: a deterministic ~10% of customers is held out as control (HELD, no offer sent); treatment customers receive SENT, then ACCEPTED or EXPIRED. The rules allow at most 1 offer per 7 days (max 3 in 30 days, including HELD) and at most 1 OPEN offer per customer at a time.
-
-Acceptance: accepting a discounted package offer deducts the discounted price for prepaid customers and emits a non-auto-renewing package_events PURCHASE; reaching a RECHARGE_BONUS target grants a free reward package. Full details: docs/core/step9_offers.md.
-
-Dirty data model (Step 10)
-
-Post-hook injection: runs after all simulation hooks and before JSONL write (simulator/dirty/processor.py), so inter-hook logic stays clean while Bronze/Silver ingestion gets realistic anomalies.
-
-Three anomaly types: ~1.5% null injection on non-envelope/non-primary-key fields, ~0.5% exact duplicate events (same event_id), and ~1.5% late events held in SQLite (delayed_events) for 1 to 8 bands (up to 48 hours) and emitted with their original event_time. Full details: docs/core/step10_dirty_data.md.
-
-Kafka ingestion model (Step 11)
-
-Nine topics: customer_events, profile_events, usage_events, recharge_events, package_events, offer_events, and lifecycle_events are partitioned by customer_id; tower_metrics_events and network_events are partitioned by tower_id (6 partitions each, 30-day retention on a local WSL2 Kafka 3.9 KRaft broker).
-
-Resumable replay & DLQ: ingestion/replay.py reads local .jsonl files, tracks line/byte offsets atomically in state/producer_ckpt.json so restarts never duplicate already-sent lines, supports --limit for bounded smoke tests, and routes malformed JSON lines to a Dead Letter Queue instead of crashing. Full details: docs/core/step11_kafka_ingestion.md.
-
-S3 Bronze storage model (Step 12)
-
-Masters vs. events: ingestion/masters_uploader.py compresses tower_master, packages_master, and field_teams_master into s3://churnguard-data-bilawal/raw/masters/<master>/snapshot_date=YYYY-MM-DD/<master>.jsonl.gz.
-
-At-least-once S3 consumer: ingestion/consumer.py subscribes to all 9 Kafka topics, groups records into micro-batches (batch_records=5000, batch_seconds=60, --idle-timeout-ms), writes gzip-compressed NDJSON files partitioned by topic and UTC event date (raw/events/<topic>/dt=YYYY-MM-DD/batch_<utc>_<uuid8>.jsonl.gz, plus raw/dlq/dt=YYYY-MM-DD/ for unparseable payloads), and calls consumer.commit() only after every S3 put_object call succeeds. Full details: docs/core/step12_s3_bronze.md.
-
-Project structure
-
-Plaintext
+```text
 config/                 Runtime and test configuration; reference inputs
   reference/            Jazz package CSV and its source note
 data/                   Generated output (git-ignored)
-  raw/                  Generated master-data output
+  raw/                  Generated master-data and event JSONL output
   reference/            Source snapshots used during development
   test_run*/            Output of the verification script
 docs/                   Project, schema, and data-flow documentation
@@ -339,7 +317,7 @@ ingestion/              Kafka and AWS S3 Bronze pipeline
   settings.py           Kafka/S3 config loader and topic retention/partition defaults
   topics.py             9-topic registry and deterministic partition key mapping
   kafka_admin.py        Idempotent Kafka topic creation via AdminClient
-  producer.py           Idempotent Kafka producer wrapper with batch flush and DLQ support
+  producer.py           Async batched Kafka producer wrapper with flush and DLQ support
   replay.py             Resumable JSONL-to-Kafka replay with atomic checkpointing
   masters_uploader.py   Gzip snapshot uploader for master tables to S3 raw/masters/
   consumer.py           Micro-batched Kafka-to-S3 Bronze consumer with at-least-once commits
@@ -359,110 +337,114 @@ simulator/
 state/                  SQLite runtime state and producer checkpoints (git-ignored)
 tests/                  Automated tests (288 passing across simulator and ingestion)
 tools/                  Source-checking and package-data scripts
-Key design rules
+```
 
-Time: the simulated clock moves in four six-hour bands per day (Night, Morning, Afternoon, Evening). History runs fast (backfill, 180 days), then the simulator can continue live. Tower state uses an hour index (band index x 6 + hour).
+## Key design rules
 
-Events vs state: events are the real data and go to JSONL, then Kafka, then S3. The SQLite state store only remembers what the simulator needs to continue (balances, packages, status, tower state, offers, delayed events, the current band) and keeps no history. Do not delete state/ during a run.
+- **Time:** the simulated clock moves in four six-hour bands per day (Night, Morning, Afternoon, Evening). History runs fast (backfill, 180 days), then the simulator can continue live. Tower state uses an hour index (`band index x 6 + hour`).
+- **Events vs state:** events are the real data and go to JSONL, then Kafka, then S3. The SQLite state store only remembers what the simulator needs to continue (balances, packages, status, tower state, offers, delayed events, the current band) and keeps no history. Do not delete `state/` during a run.
+- **Reproducible:** a fixed seed plus a per-entity random generator, so adding customers or towers later does not change existing ones.
+- **Resumable:** a restart continues from the saved band. The verification script stops runs midway and checks that both clean and dirty resumed outputs match full runs.
+- **Config fingerprint:** `seed`, `start_date`, and the four `ids` values form a `config_hash`. If any of these change after a run has started, the simulator stops instead of mixing old and new data. Scale settings (customers, history days, rates) can change.
+- **No zone or city copies:** `customer_events` has no zone, and SQLite has no city column. A customer's connected tower changes from band to band, so zone and city come from the tower (`tower_id` joined to the tower master).
+- **Shared device type:** `device_type_for(cfg, n)` gives the same device every time, so the customer event and the usage generator always agree.
+- **Hidden ground truth:** at-risk state, churn reasons, and the tower failure state (`precursor_active`, `failure_at`) are never published as events or model features.
+- **Tower traffic is real:** tower load comes from the band's usage events, not from a guess. Tower failures reach usage one band later. DOWN hours have no tower metrics event, so tower totals are not equal to totals taken from usage events.
+- **Real package prices:** package prices come from real Jazz packages and are much cheaper per unit than the out-of-bundle rates, so buying a package makes sense for customers.
+- **At-least-once Bronze delivery:** `ingestion/consumer.py` never commits Kafka consumer offsets until every S3 `put_object` call in the micro-batch succeeds; a failed upload leaves offsets uncommitted for safe retry, and downstream Silver ETL deduplicates by `event_id`.
 
-Reproducible: a fixed seed plus a per-entity random generator, so adding customers or towers later does not change existing ones.
-
-Resumable: a restart continues from the saved band. The verification script stops runs midway and checks that both clean and dirty resumed outputs match full runs.
-
-Config fingerprint: seed, start_date, and the four ids values form a config_hash. If any of these change after a run has started, the simulator stops instead of mixing old and new data. Scale settings (customers, history days, rates) can change.
-
-No zone or city copies: customer_events has no zone, and SQLite has no city column. A customer's connected tower changes from band to band, so zone and city come from the tower (tower_id joined to the tower master).
-
-Shared device type: device_type_for(cfg, n) gives the same device every time, so the customer event and the usage generator always agree.
-
-Hidden ground truth: at-risk state, churn reasons, and the tower failure state (precursor_active, failure_at) are never published as events or model features.
-
-Tower traffic is real: tower load comes from the band's usage events, not from a guess. Tower failures reach usage one band later. DOWN hours have no tower metrics event, so tower totals are not equal to totals taken from usage events.
-
-Real package prices: package prices come from real Jazz packages and are much cheaper per unit than the out-of-bundle rates, so buying a package makes sense for customers.
-
-At-least-once Bronze delivery: ingestion/consumer.py never commits Kafka consumer offsets until every S3 put_object call in the micro-batch succeeds; a failed upload leaves offsets uncommitted for safe retry, and downstream Silver ETL deduplicates by event_id.
-
-Setup
+## Setup
 
 From the project root in PowerShell:
 
-PowerShell
+```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-Run
+```
+
+## Run
 
 Generate master data using the main configuration:
 
-PowerShell
+```powershell
 python -m simulator.run_masters --config config/config.yaml
+```
+
 Use the smaller configuration for a test-sized master-data run:
 
-PowerShell
+```powershell
 python -m simulator.run_masters --config config/config_test.yaml
+```
+
 Run the test suite:
 
-PowerShell
+```powershell
 python -m pytest tests -v
-Run the end-to-end check of the customer, billing, usage, tower, offer, lifecycle and dirty-data pipeline (test config; it writes only to data/test_run* and state/test_sim*.db and deletes them first):
+```
 
-PowerShell
+Run the end-to-end check of the customer, billing, usage, tower, offer, lifecycle and dirty-data pipeline (test config; it writes only to `data/test_run*` and `state/test_sim*.db` and deletes them first):
+
+```powershell
 python -m simulator.verify_core_pipeline
-It runs clean and dirty simulations (normal, same seed again, stopped and resumed) and prints PASS or FAIL for sixteen checks. These cover same-seed output (all nine topics), resume matching a full run, event counts and envelopes, masked phone and CNIC, valid customer and tower references, tower metrics and outage pairs, hidden-state privacy, tower dropped-call totals, recharge and package validity, usage spend and package fields, non-negative balances, lifecycle transitions, no usage for SUSPENDED or CHURNED customers, offer validation (offer_events groups, actions, trigger rules, and package purchase links), and dirty-data injection (nulls, duplicates, late arrivals, and dirty stop/resume determinism). The script raises the failure rates for its own run so that the short test has outages; the real constants in simulator/towers/model.py do not change.
+```
 
-Provision the 9 Kafka topics (with the WSL2 Kafka 3.9 KRaft broker running):
+It runs clean and dirty simulations (normal, same seed again, stopped and resumed) and prints PASS or FAIL for sixteen checks. These cover same-seed output (all nine topics), resume matching a full run, event counts and envelopes, masked phone and CNIC, valid customer and tower references, tower metrics and outage pairs, hidden-state privacy, tower dropped-call totals, recharge and package validity, usage spend and package fields, non-negative balances, lifecycle transitions, no usage for SUSPENDED or CHURNED customers, offer validation (`offer_events` groups, actions, trigger rules, and package purchase links), and dirty-data injection (nulls, duplicates, late arrivals, and dirty stop/resume determinism). The script raises the failure rates for its own run so that the short test has outages; the real constants in `simulator/towers/model.py` do not change.
 
-PowerShell
-python -m ingestion.kafka_admin --config config/config_test.yaml
-Replay local JSONL events into Kafka (use --limit for a bounded smoke test or omit it for full resumable replay):
+Start the WSL2 Kafka 3.9 KRaft broker (once per reboot):
 
-PowerShell
+```powershell
+wsl -d Ubuntu-22.04 -e bash -lc '/home/bilawal/kafka_2.13-3.9.2/bin/kafka-server-start.sh -daemon /home/bilawal/kafka_2.13-3.9.2/config/kraft/server.properties'
+```
+
+Provision the 9 Kafka topics:
+
+```powershell
+python -m ingestion.kafka_admin --config config/config.yaml
+```
+
+Replay local JSONL events into Kafka (use `--limit` for a bounded smoke test or omit it for full resumable replay):
+
+```powershell
 python -m ingestion.replay --config config/config_test.yaml --raw-dir data/test_run_dirty --limit 10
-python -m ingestion.replay --config config/config_test.yaml --raw-dir data/test_run_dirty
-Upload master snapshots and consume Kafka topics into AWS S3 Bronze (raw/):
+python -m ingestion.replay --config config/config.yaml --raw-dir data/raw --checkpoint state/producer_ckpt.json
+```
 
-PowerShell
-python -m ingestion.masters_uploader --config config/config_test.yaml
-python -m ingestion.consumer --config config/config_test.yaml --idle-timeout-ms 5000
-Master-data output is written under data/raw/. Full 180-day simulator orchestration, Bronze verification checks, and PySpark Silver ETL are added in Step 13+.
+Upload master snapshots and consume Kafka topics into AWS S3 Bronze (`raw/`):
 
-Configuration
+```powershell
+python -m ingestion.masters_uploader --config config/config.yaml --raw-dir data/raw
+python -m ingestion.consumer --config config/config.yaml --idle-timeout-ms 5000
+```
 
-config/config.yaml is the real configuration and config/config_test.yaml is a small one for tests (5 days, 100 customers, 1 to 3 towers per city).
+Master-data output is written under `data/raw/`. Full 180-day Bronze ingestion (**2,573,571 events**) is complete; Bronze verification checks and PySpark Silver ETL follow in Step 14+.
 
-Section	What it controls
-seed, start_date, history_days	Reproducibility and the simulated time range
-ids	ID prefixes and widths (customers C0000001, towers T01001)
-customers	Initial burst, burst length and decay (burst_decay), new customers per day, prepaid share
-geography	Eight cities: customer share, towers, field teams
-churn, towers	Churn target and timings; tower health thresholds (critical_load, signal thresholds, failure_precursor_share)
-dirty_data	Deliberate nulls, duplicates, and late events
-kafka, s3	Broker connection, topic retention, bucket name, and S3 micro-batching settings
-The profile shares, persona tables and usage constants live in code (simulator/customers/events.py and simulator/usage/generator.py), the tower model constants (failure rates, durations, signal levels, hourly weights) live in simulator/towers/model.py and simulator/towers/hook.py, and the billing constants (recharge amounts and shares, channel shares, buying chances, out-of-bundle rates, region mapping) live in simulator/billing/engine.py, not in the config.
+## Configuration
 
-Documentation
+`config/config.yaml` is the real configuration and `config/config_test.yaml` is a small one for tests (5 days, 100 customers, 1 to 3 towers per city).
 
-docs/schema/event_schemas.md: event and master schemas, Kafka keys, S3 partitions
+| Section | What it controls |
+|---|---|
+| `seed`, `start_date`, `history_days` | Reproducibility and the simulated time range |
+| `ids` | ID prefixes and widths (customers `C0000001`, towers `T01001`) |
+| `customers` | Initial burst, burst length and decay (`burst_decay`), new customers per day, prepaid share |
+| `geography` | Eight cities: customer share, towers, field teams |
+| `churn`, `towers` | Churn target and timings; tower health thresholds (`critical_load`, signal thresholds, `failure_precursor_share`) |
+| `dirty_data` | Deliberate nulls, duplicates, and late events |
+| `kafka`, `s3` | Broker connection, topic retention, bucket name, and S3 micro-batching settings |
 
-docs/core/step3_simulator_core.md: simulator core design
+The profile shares, persona tables and usage constants live in code (`simulator/customers/events.py` and `simulator/usage/generator.py`), the tower model constants (failure rates, durations, signal levels, hourly weights) live in `simulator/towers/model.py` and `simulator/towers/hook.py`, and the billing constants (recharge amounts and shares, channel shares, buying chances, out-of-bundle rates, region mapping) live in `simulator/billing/engine.py`, not in the config.
 
-docs/core/step5_tower_health.md: tower health design and numbers
+## Documentation
 
-docs/core/step7_billing.md: recharge, packages and spend design and numbers
-
-docs/core/step8_lifecycle.md: lifecycle, at-risk state and churn rules
-
-docs/core/step9_offers.md: offers, treatment/control holdout and trigger rules
-
-docs/core/step10_dirty_data.md: dirty data injection rules and verification
-
-docs/core/step11_kafka_ingestion.md: Kafka 9-topic provisioning, resumable replay, checkpointing, and DLQ
-
-docs/core/step12_s3_bronze.md: S3 Bronze master snapshots, micro-batched consumer, and at-least-once commits
-
-docs/master/: master-data summary and data flow
-
-docs/tools/: how the Jazz package data was collected
-
-
+- `docs/schema/event_schemas.md`: event and master schemas, Kafka keys, S3 partitions
+- `docs/core/step3_simulator_core.md`: simulator core design
+- `docs/core/step5_tower_health.md`: tower health design and numbers
+- `docs/core/step7_billing.md`: recharge, packages and spend design and numbers
+- `docs/core/step8_lifecycle.md`: lifecycle, at-risk state and churn rules
+- `docs/core/step9_offers.md`: offers, treatment/control holdout and trigger rules
+- `docs/core/step10_dirty_data.md`: dirty data injection rules and verification
+- `docs/core/step11_kafka_ingestion.md`: Kafka 9-topic provisioning, async resumable replay, checkpointing, and DLQ
+- `docs/core/step12_s3_bronze.md`: S3 Bronze master snapshots, micro-batched consumer, 2.57M backfill runbook, and at-least-once commits
+- `docs/master/`: master-data summary and data flow
+- `docs/tools/`: how the Jazz package data was collected

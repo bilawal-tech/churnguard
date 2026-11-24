@@ -1,5 +1,6 @@
-"""Kafka producer and producer-side dead-letter writing."""
+﻿"""Kafka producer and producer-side dead-letter writing."""
 import json
+import threading
 from pathlib import Path
 
 from kafka import KafkaProducer
@@ -24,6 +25,8 @@ class EventProducer:
         )
         self.max_retries = max_retries
         self.owns_producer = producer is None
+        self._dlq_lock = threading.Lock()
+        self._async_dlq_counts: dict[str, int] = {}
         self.producer = (
             producer
             if producer is not None
@@ -32,7 +35,7 @@ class EventProducer:
                 acks="all",
                 retries=max_retries,
                 linger_ms=50,
-                batch_size=65536,
+                batch_size=262144,
                 key_serializer=lambda key: key.encode("utf-8") if key is not None else None,
                 value_serializer=lambda value: json.dumps(
                     value, ensure_ascii=False
@@ -41,12 +44,13 @@ class EventProducer:
         )
 
     def _write_dlq(self, topic: str, record: dict) -> None:
-        self.dlq_dir.mkdir(parents=True, exist_ok=True)
-        path = self.dlq_dir / f"producer_{topic}.jsonl"
-        with path.open("a", encoding="utf-8") as dlq_file:
-            dlq_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with self._dlq_lock:
+            self.dlq_dir.mkdir(parents=True, exist_ok=True)
+            path = self.dlq_dir / f"producer_{topic}.jsonl"
+            with path.open("a", encoding="utf-8") as dlq_file:
+                dlq_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def send_event(self, topic: str, event: dict) -> bool:
+    def send_event(self, topic: str, event: dict, async_batch: bool = False) -> bool:
         try:
             key = key_for(topic, event)
         except ValueError as exc:
@@ -56,6 +60,26 @@ class EventProducer:
                 "record": event,
             })
             return False
+
+        if async_batch and self.owns_producer:
+            def _on_error(exc):
+                self._write_dlq(topic, {
+                    "topic": topic,
+                    "error": str(exc),
+                    "record": event,
+                })
+                with self._dlq_lock:
+                    self._async_dlq_counts[topic] = self._async_dlq_counts.get(topic, 0) + 1
+
+            try:
+                future = self.producer.send(topic, key=key, value=event)
+                add_errback = getattr(future, "add_errback", None)
+                if callable(add_errback):
+                    add_errback(_on_error)
+                return True
+            except Exception as exc:
+                _on_error(exc)
+                return False
 
         last_error = None
         for _ in range(self.max_retries):
@@ -75,6 +99,10 @@ class EventProducer:
         })
         return False
 
+    def pop_async_dlq_count(self, topic: str) -> int:
+        with self._dlq_lock:
+            return self._async_dlq_counts.pop(topic, 0)
+
     def write_dlq_raw(self, topic: str, raw_line: str, error: str) -> None:
         self._write_dlq(topic, {
             "topic": topic,
@@ -89,3 +117,4 @@ class EventProducer:
         if self.owns_producer:
             self.flush()
             self.producer.close()
+

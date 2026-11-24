@@ -1,4 +1,4 @@
-"""Replay local event JSONL files to Kafka with resumable checkpoints."""
+﻿"""Replay local event JSONL files to Kafka with resumable checkpoints."""
 import argparse
 import json
 import os
@@ -71,12 +71,18 @@ def replay_jsonl(
                     topic, raw_line, "JSON record must be an object"
                 )
                 stats[topic]["dlq"] += 1
-            elif active_producer.send_event(topic, event):
+            elif active_producer.send_event(topic, event, async_batch=True):
                 stats[topic]["sent"] += 1
             else:
                 stats[topic]["dlq"] += 1
 
         active_producer.flush()
+        pop_dlq = getattr(active_producer, "pop_async_dlq_count", None)
+        if callable(pop_dlq):
+            async_failed = pop_dlq(topic)
+            if async_failed:
+                stats[topic]["sent"] = max(0, stats[topic]["sent"] - async_failed)
+                stats[topic]["dlq"] += async_failed
         checkpoint[filename] = chunk[-1][0] + 1
         save_checkpoint(state_path, checkpoint)
 
@@ -154,3 +160,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
