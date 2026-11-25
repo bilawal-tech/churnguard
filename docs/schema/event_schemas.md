@@ -193,3 +193,7 @@ Persona (call-heavy, SMS-heavy, WhatsApp-only, data-heavy), price sensitivity, b
 **[tay hua, Step 5]** Tower ki state SQLite `tower_state` mein (publish nahi hoti, sirf resume ke liye): tower_id, health, load, signal_dbm, precursor_active, failure_at, precursor_start_hour, dip_until_hour, down_until_hour, outage_id, outage_cause, outage_severity, outage_affected_pct, last_over_load_hour. Waqt ghante ke index mein (band_index x 6 + ghanta). `precursor_active` aur `failure_at` kisi event mein nahi jate.
 
 **[tay hua]** `city` ka column nahi rakha: city home_tower_id se tower_master se mil jati hai aur kabhi badalti nahi. `device_type` aur usage ka per-customer factor bhi SQLite mein nahi, seed se dobara ban jate hain (`device_type_for`, `persona_for`, `customer_factor`). Persona ab device ke hisaab se chuni jati hai (feature phone sirf call_heavy ya sms_heavy).
+
+## 7. Silver tables (Step 14)
+
+Silver (`data/silver/`, Parquet) keeps the Bronze columns plus `event_date` (PKT), `bronze_file`, `*_imputed` flags and `customer_known` / `tower_known` / `package_known`. Derived tables: `customer_status_history`, `subscriptions`, `offers`, `outages`, `tower_hourly_grid`. Details: `docs/core/step14_silver.md`.
