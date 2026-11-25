@@ -1,4 +1,4 @@
-"""Churn ka dimaagh: sirf constants, koi file ya SQLite nahi.
+﻿"""Churn ka dimaagh: sirf constants, koi file ya SQLite nahi.
 
 Ye shuruati qeematein hain, Step 13 (180 din ki run) mein churn rate ~26.5% par tune hongi.
 Roz ka churn chance = BASE_DAILY_CHURN * (1 + risk_score) * noise.
@@ -12,13 +12,13 @@ CHURNED = "CHURNED"
 REACTIVATED = "REACTIVATED"
 
 # --- base chance ---
-BASE_DAILY_CHURN = 0.0010        # prepaid, har ACTIVE customer, roz
+BASE_DAILY_CHURN = 0.00155        # prepaid, har ACTIVE customer, roz
 POSTPAID_CHURN_FACTOR = 0.5
 NOISE_SD = 0.25                  # chance par multiplicative noise
 
 # --- price adder (arpu_band se) ---
 PRICE_SENSITIVITY = {"low": 1.0, "mid": 0.5, "high": 0.2}
-PRICE_WEIGHT = 0.6
+PRICE_WEIGHT = 0.30
 
 # --- usage girawat: 7 din vs 28 din ka hafta-wari average ---
 USAGE_WINDOW_DAYS = 7
@@ -45,8 +45,8 @@ INACTIVE_CHURN_DAYS = 30
 REACTIVATE_CHANCE_PER_DAY = 0.03
 
 # --- at-risk (chhupi state) ---
-AT_RISK_THRESHOLD = 1.0          # risk_score is se upar ho to at_risk = 1
-AT_RISK_CHURN_MULTIPLIER = 2.0
+AT_RISK_THRESHOLD = 0.75          # risk_score is se upar ho to at_risk = 1
+AT_RISK_CHURN_MULTIPLIER = 1.6
 AT_RISK_RECOVER_DAYS = 14
 AT_RISK_USAGE_FACTOR = 0.4       # at-risk customer ka usage is hisse par
 AT_RISK_RECHARGE_CHANCE = 0.15   # at-risk customer ka recharge chance (balance < 50 par)

@@ -1,4 +1,4 @@
-import gzip
+﻿import gzip
 import json
 import re
 import sys
@@ -187,13 +187,13 @@ def test_consumer_partitions_events_and_commits_after_uploads():
         tuple(item["Key"].split("/")[2:4]): gunzip_records(item["Body"])
         for item in s3.objects
     }
-    assert uploaded[("usage_events", "dt=2026-04-01")] == [
+    assert [{k: v for k, v in r.items() if k != "ingest_time"} for r in uploaded[("usage_events", "dt=2026-04-01")]] == [
         {"event_id": "u1", "event_ts": "2026-04-01T10:00:00+05:00"}
     ]
-    assert uploaded[("usage_events", "dt=2026-04-02")] == [
+    assert [{k: v for k, v in r.items() if k != "ingest_time"} for r in uploaded[("usage_events", "dt=2026-04-02")]] == [
         {"event_id": "u2", "event_ts": "2026-04-02T10:00:00+05:00"}
     ]
-    assert uploaded[("offer_events", "dt=2026-04-01")] == [
+    assert [{k: v for k, v in r.items() if k != "ingest_time"} for r in uploaded[("offer_events", "dt=2026-04-01")]] == [
         {"event_id": "o1", "timestamp": "2026-04-01T10:00:00+05:00"}
     ]
     assert summary == {"batches": 1, "records": 3, "dlq": 0, "uploads": 3}

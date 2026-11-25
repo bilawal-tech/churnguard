@@ -1,7 +1,17 @@
-import json
+﻿import json
+import pytest
 
 from simulator.core.state_store import StateStore
+from simulator.lifecycle import model as lifecycle_model
 from simulator.run_history import TOPICS, main
+
+
+@pytest.fixture(autouse=True)
+def _fast_lifecycle_for_2day_smoke_test(monkeypatch):
+    monkeypatch.setattr(lifecycle_model, "BASE_DAILY_CHURN", 0.05)
+    monkeypatch.setattr(lifecycle_model, "INACTIVE_SUSPEND_DAYS", 2)
+    monkeypatch.setattr(lifecycle_model, "INACTIVE_CHURN_DAYS", 4)
+    monkeypatch.setattr(lifecycle_model, "REACTIVATE_CHANCE_PER_DAY", 0.3)
 
 
 def run_args(out_dir, db_path, *extra):

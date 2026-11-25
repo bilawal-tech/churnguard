@@ -18,12 +18,12 @@ ChurnGuard is a configurable telecom customer-churn and tower-health early-warni
 | 10 | Dirty data (nulls, duplicates, late events) | Done |
 | 11 | Kafka ingestion (9 topics, deterministic partition keys, async batch replay, DLQ) | Done |
 | 12 | S3 Bronze storage (masters snapshot uploader, micro-batched gzip consumer) | Done |
-| 13 | Full 180-day simulation & S3 Bronze backfill (2,573,571 events, 0 DLQ) | Done |
+| 13 | Full 180-day simulation & S3 Bronze backfill (17,506,324 events (17,416,126 unique event_id), 0 DLQ) | Done |
 | 14 | Bronze checks and Silver ETL (PySpark cleansing & deduplication) | Planned |
 
 After Bronze ingestion: Silver (cleansing), Gold (features), PostgreSQL, the four solutions (churn prediction, tower failure alerts, offers, complaints model), dashboard, and Docker.
 
-Step 4 produces `customer_events`, `profile_events` and `usage_events`. Step 5 adds `tower_metrics_events` (hourly) and `network_events` (outage START and END), and tower health now changes `dropped_calls` and moves customers off a DOWN tower. Step 7 adds `recharge_events` and `package_events` and fills `active_package_ids`, `spend_from_package` and `spend_from_balance` in `usage_events`. Step 8 adds daily lifecycle decisions and `lifecycle_events`. Step 9 adds daily offer evaluation, treatment/control holdout, and `offer_events` (plus discounted or free `package_events` on acceptance). Step 10 adds post-hook dirty data injection (nulls, exact duplicates, and SQLite-persisted late events). Step 11 provisions the 9 Kafka topics (54 partitions) and replays local JSONL streams into Kafka with asynchronous batching, atomic checkpointing, and DLQ routing. Step 12 uploads master snapshots and consumes the 9 Kafka topics into date-partitioned `.jsonl.gz` objects in AWS S3 Bronze (`raw/`). Step 13 completes the full 180-day historical backfill of **2,573,571 events** into S3 Bronze with zero DLQ records.
+Step 4 produces `customer_events`, `profile_events` and `usage_events`. Step 5 adds `tower_metrics_events` (hourly) and `network_events` (outage START and END), and tower health now changes `dropped_calls` and moves customers off a DOWN tower. Step 7 adds `recharge_events` and `package_events` and fills `active_package_ids`, `spend_from_package` and `spend_from_balance` in `usage_events`. Step 8 adds daily lifecycle decisions and `lifecycle_events`. Step 9 adds daily offer evaluation, treatment/control holdout, and `offer_events` (plus discounted or free `package_events` on acceptance). Step 10 adds post-hook dirty data injection (nulls, exact duplicates, and SQLite-persisted late events). Step 11 provisions the 9 Kafka topics (54 partitions) and replays local JSONL streams into Kafka with asynchronous batching, atomic checkpointing, and DLQ routing. Step 12 uploads master snapshots and consumes the 9 Kafka topics into date-partitioned `.jsonl.gz` objects in AWS S3 Bronze (`raw/`). Step 13 completes the full 180-day historical backfill of **17,506,324 events (17,416,126 unique event_id)** into S3 Bronze with zero DLQ records.
 
 ## Architecture
 
@@ -46,7 +46,7 @@ flowchart LR
     class SILVER,GOLD,PG,MODELS,DASH todo
 ```
 
-Green is built, yellow is in progress, grey is planned. Local JSONL generation, Kafka topic replay, and AWS S3 Bronze ingestion (2,573,571 events across 180 simulated days) are complete. Master data (`tower_master`, `packages_master`, `field_teams_master`) uploads directly to S3 Bronze (`raw/masters/`), bypassing Kafka.
+Green is built, yellow is in progress, grey is planned. Local JSONL generation, Kafka topic replay, and AWS S3 Bronze ingestion (17,506,324 events (17,416,126 unique event_id) across 180 simulated days) are complete. Master data (`tower_master`, `packages_master`, `field_teams_master`) uploads directly to S3 Bronze (`raw/masters/`), bypassing Kafka.
 
 ### How the pieces connect
 
@@ -297,7 +297,7 @@ DOWN lasts 3 to 12 hours. Load is the band's real traffic (`active_users` from u
 ## S3 Bronze storage model (Step 12 & Step 13 Backfill)
 
 - **Masters vs. events:** `ingestion/masters_uploader.py` compresses `tower_master`, `packages_master`, and `field_teams_master` into `s3://churnguard-data-bilawal/raw/masters/<master>/snapshot_date=YYYY-MM-DD/<master>.jsonl.gz`.
-- **At-least-once S3 consumer:** `ingestion/consumer.py` consumes all 9 Kafka topics (54 partitions), groups records into micro-batches (`batch_records=50000`, `batch_seconds=15` for full backfill; `batch_records=5000`, `batch_seconds=60` default), writes gzip-compressed NDJSON files partitioned by topic and UTC event date (`raw/events/<topic>/dt=YYYY-MM-DD/batch_<utc>_<uuid8>.jsonl.gz`, plus `raw/dlq/dt=YYYY-MM-DD/` for unparseable payloads), and calls `consumer.commit()` only after every S3 `put_object` call succeeds. Full 180-day backfill completed with **2,573,571 events** and **0 DLQ** records. Full details: `docs/core/step12_s3_bronze.md`.
+- **At-least-once S3 consumer:** `ingestion/consumer.py` consumes all 9 Kafka topics (54 partitions), groups records into micro-batches (`batch_records=50000`, `batch_seconds=15` for full backfill; `batch_records=5000`, `batch_seconds=60` default), writes gzip-compressed NDJSON files partitioned by topic and PKT event date (the date part of event_time) (`raw/events/<topic>/dt=YYYY-MM-DD/batch_<utc>_<uuid8>.jsonl.gz`, plus `raw/dlq/dt=YYYY-MM-DD/` for unparseable payloads), and calls `consumer.commit()` only after every S3 `put_object` call succeeds. Full 180-day backfill completed with **17,506,324 events (17,416,126 unique event_id)** and **0 DLQ** records. Full details: `docs/core/step12_s3_bronze.md`.
 
 ## Project structure
 
@@ -417,7 +417,7 @@ python -m ingestion.masters_uploader --config config/config.yaml --raw-dir data/
 python -m ingestion.consumer --config config/config.yaml --idle-timeout-ms 5000
 ```
 
-Master-data output is written under `data/raw/`. Full 180-day Bronze ingestion (**2,573,571 events**) is complete; Bronze verification checks and PySpark Silver ETL follow in Step 14+.
+Master-data output is written under `data/raw/`. Full 180-day Bronze ingestion (**17,506,324 events (17,416,126 unique event_id)**) is complete; Bronze verification checks and PySpark Silver ETL follow in Step 14+.
 
 ## Configuration
 
@@ -445,6 +445,6 @@ The profile shares, persona tables and usage constants live in code (`simulator/
 - `docs/core/step9_offers.md`: offers, treatment/control holdout and trigger rules
 - `docs/core/step10_dirty_data.md`: dirty data injection rules and verification
 - `docs/core/step11_kafka_ingestion.md`: Kafka 9-topic provisioning, async resumable replay, checkpointing, and DLQ
-- `docs/core/step12_s3_bronze.md`: S3 Bronze master snapshots, micro-batched consumer, 2.57M backfill runbook, and at-least-once commits
+- `docs/core/step12_s3_bronze.md`: S3 Bronze master snapshots, micro-batched consumer, 17.5M backfill runbook, and at-least-once commits
 - `docs/master/`: master-data summary and data flow
 - `docs/tools/`: how the Jazz package data was collected

@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -143,10 +143,6 @@ def main(argv=None):
     try:
         tower_model.SUDDEN_RATE = 0.01
         tower_model.DIP_RATE = 0.01
-        lifecycle_model.BASE_DAILY_CHURN = 0.05
-        lifecycle_model.INACTIVE_SUSPEND_DAYS = 2
-        lifecycle_model.INACTIVE_CHURN_DAYS = 4
-        lifecycle_model.REACTIVATE_CHANCE_PER_DAY = 0.3
         Simulator(
             cfg, store, out_dir, hooks=hooks, post_hooks=post_hooks
         ).run(live=False)
@@ -168,7 +164,7 @@ def main(argv=None):
     print("Event line counts:")
     for topic in TOPICS:
         path = out_dir / f"{topic}.jsonl"
-        count = len(path.read_text(encoding="utf-8").splitlines()) if path.exists() else 0
+        count = sum(1 for _ in path.open("rb")) if path.exists() else 0
         print(f"  {topic}: {count}")
     return 0
 

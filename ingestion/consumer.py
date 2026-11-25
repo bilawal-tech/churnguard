@@ -1,4 +1,4 @@
-"""Consume Kafka event topics and write partitioned Bronze batches to S3."""
+﻿"""Consume Kafka event topics and write partitioned Bronze batches to S3."""
 import argparse
 import gzip
 import json
@@ -17,7 +17,7 @@ from ingestion.settings import load_settings as load_ingestion_settings
 from ingestion.topics import EVENT_TOPICS
 
 _DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_TIMESTAMP_FIELDS = ("event_ts", "timestamp", "ts", "created_at")
+_TIMESTAMP_FIELDS = ("event_date", "event_time", "event_ts", "timestamp", "ts", "created_at")
 
 
 def _utc_now() -> datetime:
@@ -123,6 +123,7 @@ class S3BronzeConsumer:
                 continue
 
             dt = _date_from_event(event, fallback_date)
+            event.setdefault("ingest_time", utc_now.isoformat())
             event_groups[(message.topic, dt)].append(event)
 
         uploads = 0

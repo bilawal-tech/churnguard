@@ -1,12 +1,12 @@
-import pytest
+﻿import pytest
 
 from simulator.lifecycle import engine as e
 from simulator.lifecycle import model as m
 
 
 def test_price_adder():
-    assert e.price_adder("low") == pytest.approx(0.6)
-    assert e.price_adder("high") == pytest.approx(0.12)
+    assert e.price_adder("low") == pytest.approx(m.PRICE_WEIGHT * m.PRICE_SENSITIVITY["low"])
+    assert e.price_adder("high") == pytest.approx(m.PRICE_WEIGHT * m.PRICE_SENSITIVITY["high"])
 
 
 def test_usage_adder():
@@ -38,7 +38,7 @@ def test_churn_chance():
     base = m.BASE_DAILY_CHURN
     assert e.churn_chance(0.0, True, 0, 0.0) == pytest.approx(base)
     assert e.churn_chance(0.0, False, 0, 0.0) == pytest.approx(base * 0.5)
-    assert e.churn_chance(0.0, True, 1, 0.0) == pytest.approx(base * 2.0)
+    assert e.churn_chance(0.0, True, 1, 0.0) == pytest.approx(base * m.AT_RISK_CHURN_MULTIPLIER)
     assert e.churn_chance(0.0, True, 0, -100.0) == 0.0
     assert e.churn_chance(1e9, True, 1, 0.0) == 1.0
 
