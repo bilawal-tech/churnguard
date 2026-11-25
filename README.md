@@ -19,9 +19,10 @@ ChurnGuard is a configurable telecom customer-churn and tower-health early-warni
 | 11 | Kafka ingestion (9 topics, deterministic partition keys, async batch replay, DLQ) | Done |
 | 12 | S3 Bronze storage (masters snapshot uploader, micro-batched gzip consumer) | Done |
 | 13 | Full 180-day simulation & S3 Bronze backfill (17,506,324 events (17,416,126 unique event_id), 0 DLQ) | Done |
-| 14 | Bronze checks and Silver ETL (PySpark cleansing & deduplication) | Planned |
+| 14 | Silver PySpark ETL (`verify_silver` PASS) | Done |
+| 15 | Gold features and labels | Planned |
 
-After Bronze ingestion: Silver (cleansing), Gold (features), PostgreSQL, the four solutions (churn prediction, tower failure alerts, offers, complaints model), dashboard, and Docker.
+After Silver: Gold (features and labels), PostgreSQL, the four solutions (churn prediction, tower failure alerts, offers, complaints model), dashboard, and Docker.
 
 Step 4 produces `customer_events`, `profile_events` and `usage_events`. Step 5 adds `tower_metrics_events` (hourly) and `network_events` (outage START and END), and tower health now changes `dropped_calls` and moves customers off a DOWN tower. Step 7 adds `recharge_events` and `package_events` and fills `active_package_ids`, `spend_from_package` and `spend_from_balance` in `usage_events`. Step 8 adds daily lifecycle decisions and `lifecycle_events`. Step 9 adds daily offer evaluation, treatment/control holdout, and `offer_events` (plus discounted or free `package_events` on acceptance). Step 10 adds post-hook dirty data injection (nulls, exact duplicates, and SQLite-persisted late events). Step 11 provisions the 9 Kafka topics (54 partitions) and replays local JSONL streams into Kafka with asynchronous batching, atomic checkpointing, and DLQ routing. Step 12 uploads master snapshots and consumes the 9 Kafka topics into date-partitioned `.jsonl.gz` objects in AWS S3 Bronze (`raw/`). Step 13 completes the full 180-day historical backfill of **17,506,324 events (17,416,126 unique event_id)** into S3 Bronze with zero DLQ records.
 
@@ -43,7 +44,8 @@ flowchart LR
     classDef wip fill:#fff3cd,stroke:#b8860b,color:#000
     classDef todo fill:#eeeeee,stroke:#888888,color:#000
     class SIM,JSONL,KAFKA,BRONZE done
-    class SILVER,GOLD,PG,MODELS,DASH todo
+    class SILVER done
+    class GOLD,PG,MODELS,DASH todo
 ```
 
 Green is built, yellow is in progress, grey is planned. Local JSONL generation, Kafka topic replay, and AWS S3 Bronze ingestion (17,506,324 events (17,416,126 unique event_id) across 180 simulated days) are complete. Master data (`tower_master`, `packages_master`, `field_teams_master`) uploads directly to S3 Bronze (`raw/masters/`), bypassing Kafka.
@@ -187,6 +189,46 @@ flowchart TD
     EVENTS --> IREP --> KAFKA
     RAWM --> IMAS --> S3B
     KAFKA --> ICON --> S3B
+
+    subgraph SILV["silver/"]
+        SSET["settings.py"]
+        SSPARK["spark_session.py"]
+        SCOMMON["common.py"]
+        SSCHEMA["schemas.py"]
+        SBSYNC["bronze_sync.py"]
+        SRUN["run.py"]
+        SVERIFY["verify_silver.py"]
+        subgraph STABLES["silver/tables/"]
+            SDIMS["dims.py"]
+            SCUSTOMERS["customers.py"]
+            SUSAGE["usage.py"]
+            SFACTS["facts.py"]
+            SLIFECYCLE["lifecycle.py"]
+            SNETWORK["network.py"]
+        end
+        SSET --> SSPARK
+        SCOMMON --> SRUN
+        SSCHEMA --> SRUN
+        SSPARK --> SRUN
+        SRUN --> SDIMS
+        SRUN --> SCUSTOMERS
+        SRUN --> SUSAGE
+        SRUN --> SFACTS
+        SRUN --> SLIFECYCLE
+        SRUN --> SNETWORK
+        SSET --> SBSYNC
+    end
+
+    LOCALBRONZE[("local data/bronze/")]
+    SPARKTABLES["Spark tables"]
+    SILVERDATA[("data/silver/ (Parquet)")]
+    S3B --> SBSYNC --> LOCALBRONZE --> SPARKTABLES --> SILVERDATA --> SVERIFY
+    SDIMS --> SPARKTABLES
+    SCUSTOMERS --> SPARKTABLES
+    SUSAGE --> SPARKTABLES
+    SFACTS --> SPARKTABLES
+    SLIFECYCLE --> SPARKTABLES
+    SNETWORK --> SPARKTABLES
 ```
 
 `common.py` is shared by everything: config loading, ID formats, and a seeded random generator per entity (`make_rng`), so the same entity always gets the same values.
@@ -299,6 +341,45 @@ DOWN lasts 3 to 12 hours. Load is the band's real traffic (`active_users` from u
 - **Masters vs. events:** `ingestion/masters_uploader.py` compresses `tower_master`, `packages_master`, and `field_teams_master` into `s3://churnguard-data-bilawal/raw/masters/<master>/snapshot_date=YYYY-MM-DD/<master>.jsonl.gz`.
 - **At-least-once S3 consumer:** `ingestion/consumer.py` consumes all 9 Kafka topics (54 partitions), groups records into micro-batches (`batch_records=50000`, `batch_seconds=15` for full backfill; `batch_records=5000`, `batch_seconds=60` default), writes gzip-compressed NDJSON files partitioned by topic and PKT event date (the date part of event_time) (`raw/events/<topic>/dt=YYYY-MM-DD/batch_<utc>_<uuid8>.jsonl.gz`, plus `raw/dlq/dt=YYYY-MM-DD/` for unparseable payloads), and calls `consumer.commit()` only after every S3 `put_object` call succeeds. Full 180-day backfill completed with **17,506,324 events (17,416,126 unique event_id)** and **0 DLQ** records. Full details: `docs/core/step12_s3_bronze.md`.
 
+## Silver model (Step 14)
+
+- Silver runs PySpark 4.2.1 in local mode on WSL2 Ubuntu with Java 17 and writes snappy-compressed Parquet to `data/silver/`.
+- `python -m silver.bronze_sync` syncs S3 Bronze into `data/bronze/` from a Windows PowerShell venv; the completed sync covered 2,433 files (686 MB).
+- Silver contains 20 tables across dimensions, customer status history, facts, derived tables, and staging.
+- Dimensions include `dim_tower` (110), `dim_package` (29), `dim_field_team` (25), `tower_neighbors` (330), `dim_customer` (29,515), and `customers_current` (29,515).
+- Customer history is SCD2 (`customer_status_history`, 36,435); facts include `fact_usage` (15,104,413, partitioned by `event_date`), `fact_recharge` (279,901), `fact_package_events` (829,016), `fact_offer_events` (686,380), `fact_lifecycle_events` (6,920), `fact_network_events` (9,025), and `fact_tower_metrics` (441,444).
+- Derived tables are `subscriptions` (226,230), `offers` (366,700), `outages` (4,515), and `tower_hourly_grid` (475,200); staging tables are `customer_events` (29,512) and `profile_events` (29,515).
+- Rules: deduplicate by `event_id`, quarantine rejects under `_rejects/` (currently 0), keep nulls with deterministic imputation only and a `<col>_imputed` flag, derive `event_date` from `event_time` in PKT, and mark orphans with `customer_known`, `tower_known`, and `package_known`.
+- Each table has a DQ report under `_dq/<table>.json`; run metadata is in `_manifest/`. Silver has no features or labels; never use `churn_reason`, `at_risk`, or `inactivity_days` as Gold features.
+- Verification: `python -m silver.verify_silver` reports `RESULT PASS`. Details: [docs/core/step14_silver.md](docs/core/step14_silver.md).
+
+### Silver table flow
+
+```mermaid
+flowchart TD
+    BRONZETOPICS["Bronze topics"] --> CLEAN["Clean: dedup, rejects, imputation"]
+    CLEAN --> FACTS["Facts"]
+    CLEAN --> CUSTOMERPROFILE["customer_events + profile_events"]
+    CUSTOMERPROFILE --> DIMCUSTOMER["dim_customer"]
+    CLEAN --> LIFECYCLE["lifecycle_events"]
+    LIFECYCLE --> STATUSHISTORY["customer_status_history"]
+    STATUSHISTORY --> CURRENTCUSTOMERS["customers_current"]
+    CLEAN --> PACKAGEEVENTS["package_events"]
+    PACKAGEEVENTS --> SUBSCRIPTIONS["subscriptions"]
+    CLEAN --> OFFEREVENTS["offer_events"]
+    OFFEREVENTS --> OFFERS["offers"]
+    CLEAN --> NETWORKEVENTS["network_events"]
+    NETWORKEVENTS --> OUTAGES["outages"]
+    CLEAN --> TOWERMETRICS["tower_metrics"]
+    CLEAN --> DIMTOWER["dim_tower"]
+    TOWERMETRICS --> TOWERGRID["tower_hourly_grid"]
+    OUTAGES --> TOWERGRID
+    DIMTOWER --> TOWERGRID
+
+    classDef done fill:#d4edda,stroke:#2e7d32,color:#000
+    class BRONZETOPICS,CLEAN,FACTS,CUSTOMERPROFILE,DIMCUSTOMER,LIFECYCLE,STATUSHISTORY,CURRENTCUSTOMERS,PACKAGEEVENTS,SUBSCRIPTIONS,OFFEREVENTS,OFFERS,NETWORKEVENTS,OUTAGES,TOWERMETRICS,DIMTOWER,TOWERGRID done
+```
+
 ## Project structure
 
 ```text
@@ -306,10 +387,13 @@ config/                 Runtime and test configuration; reference inputs
   reference/            Jazz package CSV and its source note
 data/                   Generated output (git-ignored)
   raw/                  Generated master-data and event JSONL output
+  bronze/               S3 Bronze files synced for Silver
+  silver/               Silver Parquet tables and metadata
   reference/            Source snapshots used during development
   test_run*/            Output of the verification script
 docs/                   Project, schema, and data-flow documentation
   core/                 Simulator core, tower health, billing, lifecycle, offers, dirty-data, Kafka, and S3 notes
+  medallion/            Bronze and Silver layer documentation
   master/               Master-data summary and data flow
   schema/               Event schemas (event_schemas.md)
   tools/                Package-data scraping notes
@@ -334,8 +418,18 @@ simulator/
   common.py             Shared config, ID, and random-seed helpers
   run_masters.py        Master-data generation entry point
   verify_core_pipeline.py   End-to-end check of all hooks and dirty-data post-hook (16 checks)
+silver/                 PySpark Silver ETL package
+  settings.py           Silver paths, Spark defaults, and S3 settings
+  spark_session.py      Local Spark session setup
+  common.py             Shared Silver transformations and helpers
+  schemas.py            Silver table schemas
+  bronze_sync.py        S3 Bronze to local data/bronze/ sync
+  run.py                Silver table ETL entry point
+  verify_silver.py      Silver data quality and row-count verification
+  tables/               dims, customers, usage, facts, lifecycle, network modules
 state/                  SQLite runtime state and producer checkpoints (git-ignored)
-tests/                  Automated tests (288 passing across simulator and ingestion)
+tests/                  Automated tests (291 passed, 3 skipped (Windows))
+  test_silver_*.py      Silver ETL tests (run in WSL)
 tools/                  Source-checking and package-data scripts
 ```
 
@@ -367,23 +461,55 @@ python -m pip install -r requirements.txt
 
 Generate master data using the main configuration:
 
+Run in PowerShell:
+
 ```powershell
 python -m simulator.run_masters --config config/config.yaml
 ```
 
 Use the smaller configuration for a test-sized master-data run:
 
+Run in PowerShell:
+
 ```powershell
 python -m simulator.run_masters --config config/config_test.yaml
 ```
 
-Run the test suite:
+Run the full test suite in PowerShell (Silver tests are skipped on Windows and run in WSL):
 
 ```powershell
 python -m pytest tests -v
 ```
 
+Sync Bronze files from S3 to `data/bronze/` using the Windows venv:
+
+Run in PowerShell:
+
+```powershell
+.\venv\Scripts\Activate.ps1
+python -m silver.bronze_sync
+```
+
+Run the Silver ETL and verify it using the WSL venv:
+
+Run in WSL Ubuntu:
+
+```bash
+source ~/venvs/churnguard/bin/activate
+python -m silver.run --table all
+python -m silver.verify_silver
+```
+
+Run Silver tests in WSL (not Windows):
+
+```bash
+source ~/venvs/churnguard/bin/activate
+python -m pytest tests/test_silver_*.py -v
+```
+
 Run the end-to-end check of the customer, billing, usage, tower, offer, lifecycle and dirty-data pipeline (test config; it writes only to `data/test_run*` and `state/test_sim*.db` and deletes them first):
+
+Run in PowerShell:
 
 ```powershell
 python -m simulator.verify_core_pipeline
@@ -393,17 +519,23 @@ It runs clean and dirty simulations (normal, same seed again, stopped and resume
 
 Start the WSL2 Kafka 3.9 KRaft broker (once per reboot):
 
+Run from PowerShell:
+
 ```powershell
 wsl -d Ubuntu-22.04 -e bash -lc '/home/bilawal/kafka_2.13-3.9.2/bin/kafka-server-start.sh -daemon /home/bilawal/kafka_2.13-3.9.2/config/kraft/server.properties'
 ```
 
 Provision the 9 Kafka topics:
 
+Run in PowerShell:
+
 ```powershell
 python -m ingestion.kafka_admin --config config/config.yaml
 ```
 
 Replay local JSONL events into Kafka (use `--limit` for a bounded smoke test or omit it for full resumable replay):
+
+Run in PowerShell:
 
 ```powershell
 python -m ingestion.replay --config config/config_test.yaml --raw-dir data/test_run_dirty --limit 10
@@ -412,12 +544,14 @@ python -m ingestion.replay --config config/config.yaml --raw-dir data/raw --chec
 
 Upload master snapshots and consume Kafka topics into AWS S3 Bronze (`raw/`):
 
+Run in PowerShell:
+
 ```powershell
 python -m ingestion.masters_uploader --config config/config.yaml --raw-dir data/raw
 python -m ingestion.consumer --config config/config.yaml --idle-timeout-ms 5000
 ```
 
-Master-data output is written under `data/raw/`. Full 180-day Bronze ingestion (**17,506,324 events (17,416,126 unique event_id)**) is complete; Bronze verification checks and PySpark Silver ETL follow in Step 14+.
+Master-data output is written under `data/raw/`. Full 180-day Bronze ingestion (**17,506,324 events (17,416,126 unique event_id)**) is complete; Step 14 Silver ETL and `verify_silver` have passed. Gold features and labels are planned in Step 15.
 
 ## Configuration
 
@@ -446,5 +580,7 @@ The profile shares, persona tables and usage constants live in code (`simulator/
 - `docs/core/step10_dirty_data.md`: dirty data injection rules and verification
 - `docs/core/step11_kafka_ingestion.md`: Kafka 9-topic provisioning, async resumable replay, checkpointing, and DLQ
 - `docs/core/step12_s3_bronze.md`: S3 Bronze master snapshots, micro-batched consumer, 17.5M backfill runbook, and at-least-once commits
+- `docs/core/step14_silver.md`: Silver PySpark ETL, table rules, and verification
+- `docs/medallion/`: Bronze and Silver layer documentation
 - `docs/master/`: master-data summary and data flow
 - `docs/tools/`: how the Jazz package data was collected
