@@ -103,6 +103,7 @@ def main(argv=None):
     parser.add_argument("--days", type=int)
     parser.add_argument("--no-dirty", action="store_true")
     parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--test-rates", action="store_true")
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -141,8 +142,9 @@ def main(argv=None):
         lifecycle_model.REACTIVATE_CHANCE_PER_DAY,
     )
     try:
-        tower_model.SUDDEN_RATE = 0.01
-        tower_model.DIP_RATE = 0.01
+        if args.test_rates:
+            tower_model.SUDDEN_RATE = 0.01
+            tower_model.DIP_RATE = 0.01
         Simulator(
             cfg, store, out_dir, hooks=hooks, post_hooks=post_hooks
         ).run(live=False)

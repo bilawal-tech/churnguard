@@ -74,13 +74,15 @@ def churn_chance(risk_total, is_prepaid, at_risk, noise_z):
 
 
 def pick_churn_reason(adders, u):
-    """Risk wale churn ka reason. u 0..1 ka draw. Koi adder na ho to COMPETITOR_OFFER."""
-    if u < m.COMPETITOR_OFFER_SHARE:
-        return m.COMPETITOR_OFFER
-    name = max(_ADDER_REASON, key=lambda k: adders[k])
-    if adders[name] <= 0:
-        return m.COMPETITOR_OFFER
-    return _ADDER_REASON[name]
+    """Reason adders ke hisse se. COMPETITOR_OFFER ka fixed weight. u 0..1 ka draw."""
+    weights = {k: max(0.0, adders[k]) for k in _ADDER_REASON}
+    total = sum(weights.values()) + m.COMPETITOR_OFFER_WEIGHT
+    x = u * total
+    for k in _ADDER_REASON:
+        x -= weights[k]
+        if x < 0:
+            return _ADDER_REASON[k]
+    return m.COMPETITOR_OFFER
 
 
 def inactivity_transition(is_prepaid, status, inactivity_days):

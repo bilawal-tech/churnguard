@@ -20,6 +20,7 @@ def run_args(out_dir, db_path, *extra):
         "--out-dir", str(out_dir),
         "--db-path", str(db_path),
         "--days", "2",
+        "--test-rates",
         *extra,
     ]
 

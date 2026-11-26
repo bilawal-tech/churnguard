@@ -3,7 +3,21 @@ from simulator.billing.engine import apply_usage_billing
 from simulator.billing.events import build_package_event
 from simulator.usage.generator import build_usage_event, neighbor_map
 from simulator.lifecycle.engine import scale_usage_event
-from simulator.lifecycle.model import AT_RISK_USAGE_FACTOR
+from simulator.common import make_rng
+from simulator.lifecycle.model import AT_RISK_USAGE_FACTOR, DORMANT_SHARE
+from simulator.usage.generator import customer_no
+
+_DORMANT_CACHE: dict = {}
+
+
+def _is_dormant(cfg, cid):
+    key = (cfg["seed"], cid)
+    v = _DORMANT_CACHE.get(key)
+    if v is None:
+        rng = make_rng(cfg["seed"], "dormant", customer_no(cfg, cid))
+        v = float(rng.random()) < DORMANT_SHARE
+        _DORMANT_CACHE[key] = v
+    return v
 
 def make_usage_hook(cfg, towers, packages=None):
     """Return a hook(ctx) for the engine.
@@ -40,7 +54,12 @@ def make_usage_hook(cfg, towers, packages=None):
                 ctx.clock, tower_health=health,
             )
             if cust["at_risk"]:
-                scale_usage_event(ev, AT_RISK_USAGE_FACTOR)
+                if cust["plan_type"] == "prepaid" and _is_dormant(cfg, cid):
+                    scale_usage_event(ev, 0.0)
+                    ev["dropped_calls"] = 0
+                else:
+                    scale_usage_event(ev, AT_RISK_USAGE_FACTOR)
+                
 
             active_pkgs = pkgs_by_cust.get(cid, [])
             old_pkg_ids = {p["package_id"] for p in active_pkgs}

@@ -59,3 +59,6 @@ INACTIVITY = "INACTIVITY"
 COMPETITOR_OFFER = "COMPETITOR_OFFER"
 CHURN_REASONS = [HIGH_PRICE, POOR_NETWORK, USAGE_DECLINE, INACTIVITY, COMPETITOR_OFFER]
 COMPETITOR_OFFER_SHARE = 0.10    # churners ka random hissa
+# --- dormant (chup) at-risk prepaid customers: usage poora zero, SUSPENDED tak ---
+DORMANT_SHARE = 0.25
+COMPETITOR_OFFER_WEIGHT = 0.20   # reason ke liye fixed weight (adders ke saath)

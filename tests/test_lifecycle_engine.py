@@ -46,7 +46,7 @@ def test_churn_chance():
 def test_pick_churn_reason():
     net = {"price": 0.1, "network": 1.5, "usage": 0.5, "zero_balance": 0.0}
     assert e.pick_churn_reason(net, 0.5) == m.POOR_NETWORK
-    assert e.pick_churn_reason(net, 0.05) == m.COMPETITOR_OFFER
+    assert e.pick_churn_reason(net, 0.95) == m.COMPETITOR_OFFER
     zb = {"price": 0.1, "network": 0.0, "usage": 0.0, "zero_balance": 1.0}
     assert e.pick_churn_reason(zb, 0.5) == m.INACTIVITY
     none = {"price": 0.0, "network": 0.0, "usage": 0.0, "zero_balance": 0.0}
