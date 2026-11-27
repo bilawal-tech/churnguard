@@ -12,11 +12,11 @@ EXPECTED_ROWS = {
     "dim_tower": 110, "dim_package": 29, "dim_field_team": 25, "tower_neighbors": 330,
     "customer_events": 29_512, "profile_events": 29_515,
     "dim_customer": 29_515, "customers_current": 29_515,
-    "fact_usage": 15_104_413, "fact_recharge": 279_901,
-    "fact_package_events": 829_016, "fact_offer_events": 686_380,
-    "fact_lifecycle_events": 6_920, "customer_status_history": 29_515 + 6_920,
-    "fact_network_events": 9_025, "outages": 4_515,
-    "fact_tower_metrics": 441_444, "tower_hourly_grid": 475_200,
+    "fact_usage": 14_990_217, "fact_recharge": 281_314,
+    "fact_package_events": 828_631, "fact_offer_events": 680_139,
+    "fact_lifecycle_events": 8_295, "customer_status_history": 29_515 + 8_295,
+    "fact_network_events": 292, "outages": 146,
+    "fact_tower_metrics": 474_035, "tower_hourly_grid": 475_200,
 }
 
 

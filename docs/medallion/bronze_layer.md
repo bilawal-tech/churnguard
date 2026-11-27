@@ -34,7 +34,7 @@ s3://churnguard-data-bilawal/raw/   (and local data/bronze/)
 
 | Category | Dataset / Topic | Partitioning | Files | Volume / Scale | Description |
 |---|---|---|---:|---|---|
-| Master | tower_master | `snapshot_date=YYYY-MM-DD` | 1 | 10 towers | Cell tower locations, regions, cities, zones, coordinates, and capacity. |
+| Master | tower_master | `snapshot_date=YYYY-MM-DD` | 1 | 110 towers | Cell tower locations, regions, cities, zones, coordinates, and capacity. |
 | Master | packages_master | `snapshot_date=YYYY-MM-DD` | 1 | 29 packages | Telecom bundle catalog (price, validity, voice/SMS/data quotas). |
 | Master | field_teams_master | `snapshot_date=YYYY-MM-DD` | 1 | 25 teams | Regional field engineering teams and base coordinates. |
 | Event | customer_events | `dt=YYYY-MM-DD` | ~180 | ~29.5K rows | Customer signups, segments, acquisition channels, and home towers. |
@@ -47,7 +47,7 @@ s3://churnguard-data-bilawal/raw/   (and local data/bronze/)
 | Event | network_events | `dt=YYYY-MM-DD` | ~180 | ~15K+ rows | Tower outage detection, team dispatch, and restoration logs. |
 | Event | tower_metrics_events | `dt=YYYY-MM-DD` | ~180 | ~475K rows | Hourly per-tower KPIs (PRB utilization, latency, packet loss, throughput). |
 
-**Total Local Sync Footprint:** 2,433 files (686.18 MB compressed .jsonl.gz).
+**Total Local Sync Footprint:** 4,658 files (691.37 MB compressed .jsonl.gz).
 
 ## 4. Common Envelope & Guarantees
 

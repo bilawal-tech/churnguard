@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import time
 
 from ingestion.producer import EventProducer
 from ingestion.settings import IngestionSettings, load_settings
@@ -16,12 +17,24 @@ def load_checkpoint(path: Path) -> dict[str, int]:
         return json.load(checkpoint_file)
 
 
+def _replace_with_retry(src: Path, dst: Path, tries: int = 10, delay: float = 0.2) -> None:
+    """Windows par file kabhi kabhi kuch der lock rehti hai (antivirus, indexer)."""
+    for attempt in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
+
+
 def save_checkpoint(path: Path, state: dict[str, int]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_suffix(path.suffix + ".tmp")
     with temporary_path.open("w", encoding="utf-8") as checkpoint_file:
         json.dump(state, checkpoint_file, ensure_ascii=False)
-    os.replace(temporary_path, path)
+    _replace_with_retry(temporary_path, path)
 
 
 def replay_jsonl(

@@ -226,6 +226,7 @@ class S3BronzeConsumer:
 
             uploads, event_count, dlq_count = self._upload_batch(messages)
             self.consumer.commit()
+            last_activity = time.monotonic()
             summary["batches"] += 1
             summary["records"] += event_count
             summary["dlq"] += dlq_count

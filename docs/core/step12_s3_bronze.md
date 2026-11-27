@@ -32,8 +32,8 @@ Event ki `dt` tareekh `event_ts`, `timestamp`, `ts`, ya `created_at` ke ISO date
 ## At-least-once delivery
 Kafka offsets ka `consumer.commit()` tabhi chalta hai jab us batch ke **tamam** S3 `put_object` calls kamyab ho jayein. Koi upload exception de to exception dobara raise hoti hai aur offsets commit nahi hote. Is se failed upload ke baad messages dobara mil sakte hain, yani delivery at-least-once hai.
 
-## Full 180-Day Backfill Run (17,506,324 events (17,416,126 unique event_id))
-Single-node WSL2 KRaft Kafka broker par consumer group coordinator rebalance hang hone (`Assigned partitions: 0`) se bachne ke liye full historical backfill mein direct partition assignment (`consumer.assign(tps)` + `seek_to_beginning`) istemal kiya gaya. Is se tamam **54 partitions** (9 topics × 6 partitions) 50,000-record batches mein drain hokar `s3://churnguard-data-bilawal/raw/events/` par land hue (`17,506,324` records, `0` DLQ).
+## Full 180-Day Backfill Run (17,419,605 local events; S3 Bronze 17,589,554 objects-lines (17,321,950 unique event_id))
+Single-node WSL2 KRaft Kafka broker par consumer group coordinator rebalance hang hone (`Assigned partitions: 0`) se bachne ke liye full historical backfill mein direct partition assignment (`consumer.assign(tps)` + `seek_to_beginning`) istemal kiya gaya. Is se tamam **54 partitions** (9 topics × 6 partitions) 50,000-record batches mein drain hokar `s3://churnguard-data-bilawal/raw/events/` par land hue (`17,589,554` records, `0` DLQ).
 
 ## Commands
 Master snapshots upload karne ke liye:
@@ -44,7 +44,7 @@ Do batches tak consumer chalane aur idle par nikalne ke liye:
 
 PowerShell
 python -m ingestion.consumer --config config/config.yaml --max-batches 2 --batch-records 5000 --batch-seconds 60 --idle-timeout-ms 1000
-Full 180-day backfill (17,506,324 records) direct partition assignment ke saath chalane ke liye:
+Full 180-day backfill (17,419,605 local events) direct partition assignment ke saath chalane ke liye:
 
 PowerShell
 python -c "from kafka import KafkaConsumer, TopicPartition; from ingestion.settings import load_settings; from ingestion.topics import EVENT_TOPICS; from ingestion.consumer import S3BronzeConsumer; s = load_settings('config/config.yaml'); raw = KafkaConsumer(bootstrap_servers=s.bootstrap_servers, enable_auto_commit=False, auto_offset_reset='earliest'); raw.topics(); tps = [TopicPartition(t, p) for t in EVENT_TOPICS for p in (raw.partitions_for_topic(t) or [])]; raw.assign(tps); raw.seek_to_beginning(*tps); c = S3BronzeConsumer(s, consumer=raw); c.consumer.commit = lambda *a, **k: None; total = 0; 

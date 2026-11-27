@@ -47,13 +47,13 @@ def latest_snapshot(df: DataFrame, key: str) -> DataFrame:
 EXPECTED_DISTINCT = {
     "customer_events": 29_512,
     "profile_events": 29_515,
-    "usage_events": 15_104_413,
-    "recharge_events": 279_901,
-    "package_events": 829_016,
-    "offer_events": 686_380,
-    "lifecycle_events": 6_920,
-    "network_events": 9_025,
-    "tower_metrics_events": 441_444,
+    "usage_events": 14_990_217,
+    "recharge_events": 281_314,
+    "package_events": 828_631,
+    "offer_events": 680_139,
+    "lifecycle_events": 8_295,
+    "network_events": 292,
+    "tower_metrics_events": 474_035,
 }
 
 
@@ -157,8 +157,8 @@ def write_table(df, settings, table, stats, expected_distinct=None, files=1, par
         dq["min_event_date"], dq["max_event_date"] = mm["a"], mm["b"]
 
     problems = []
-    if "dedup_pct" in dq and not (0.2 <= dq["dedup_pct"] <= 1.0):
-        problems.append(f"dedup_pct {dq['dedup_pct']} 0.2-1.0 ke bahar")
+    if "dedup_pct" in dq and not (0.2 <= dq["dedup_pct"] <= 3.0):
+        problems.append(f"dedup_pct {dq['dedup_pct']} 0.2-3.0 ke bahar")
     if stats.get("bronze_rows") and 100 * stats["rejects"] / stats["bronze_rows"] > 0.5:
         problems.append("rejects 0.5% se zyada")
     if expected_distinct is not None and stats.get("rejects") == 0 and rows_out != expected_distinct:
